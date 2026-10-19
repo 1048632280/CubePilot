@@ -32,7 +32,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Run shared core tests
-        run: ./gradlew :core:test --no-daemon
+        run: ./gradlew -PtargetProject=core :core:test --no-daemon
 
   build:
     name: ${{ matrix.target.name }}
@@ -79,7 +79,7 @@ jobs:
       - name: Build server mod
         env:
           PROJECT: ${{ matrix.target.project }}
-        run: ./gradlew ":${PROJECT}:build" --no-daemon
+        run: ./gradlew "-PtargetProject=${PROJECT}" ":${PROJECT}:build" --no-daemon
 
       - name: Select distributable JAR
         env:

@@ -9,4 +9,15 @@ pluginManagement {
 }
 
 rootProject.name = 'CubePilot'
-include 'core', 'fabric-1.20.1', 'forge-1.20.1', 'fabric-1.21.1', 'neoforge-1.21.1'
+
+def platformProjects = ['fabric-1.20.1', 'forge-1.20.1', 'fabric-1.21.1', 'neoforge-1.21.1']
+def targetProject = gradle.startParameter.projectProperties.get('targetProject')
+
+include 'core'
+if (targetProject == null) {
+    include platformProjects
+} else if (targetProject != 'core' && platformProjects.contains(targetProject)) {
+    include targetProject
+} else if (targetProject != 'core') {
+    throw new GradleException("Unknown targetProject: ${targetProject}")
+}
