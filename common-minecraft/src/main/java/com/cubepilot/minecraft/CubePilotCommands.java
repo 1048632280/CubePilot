@@ -4,6 +4,8 @@ import com.cubepilot.core.AssistantReply;
 import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
 import com.cubepilot.core.CubePilotAgent;
+import com.cubepilot.core.DiagnosticAnalyzer;
+import com.cubepilot.core.DiagnosticReport;
 import com.cubepilot.core.ReadOnlyFileAccess;
 import com.cubepilot.core.ServerSnapshot;
 import com.mojang.brigadier.CommandDispatcher;
@@ -56,6 +58,10 @@ public final class CubePilotCommands {
                         .then(Commands.argument("path", StringArgumentType.greedyString())
                                 .executes(context -> readFile(context,
                                         StringArgumentType.getString(context, "path")))))
+                .then(Commands.literal("analyze")
+                        .then(Commands.argument("path", StringArgumentType.word())
+                                .executes(context -> analyze(context,
+                                        StringArgumentType.getString(context, "path")))))
                 .then(Commands.literal("inspect")
                         .then(Commands.argument("path", StringArgumentType.word())
                                 .executes(context -> inspect(context, loader, mods,
@@ -82,6 +88,7 @@ public final class CubePilotCommands {
         send(source, "/cp status | mods：查看简要服务器状态或已加载 Mod");
         send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
+        send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
         send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
         send(source, "命令建议只会显示为可点击的聊天文本：点击填入命令框后，必须由你手动按回车执行。");
         return 1;
@@ -170,11 +177,34 @@ public final class CubePilotCommands {
         try {
             CubePilotAgent agent = CubePilotAgent.get();
             String contents = agent.files().read(path);
-            agent.audit().record(source.getTextName(), "file.inspect", path);
+            DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
+            agent.audit().record(source.getTextName(), "file.inspect",
+                    "path=" + path + " category=" + report.category()
+                            + " severity=" + report.severity()
+                            + " findings=" + report.findings().size());
             return ask(context, loader, mods, question,
-                    "文件路径：" + path + "\n文件内容（凭据已脱敏）：\n" + contents);
+                    "本地只读规则诊断摘要：\n" + report.toText()
+                            + "\n\n文件路径：" + path + "\n文件内容（凭据已脱敏）：\n" + contents);
         } catch (IOException | IllegalArgumentException exception) {
             auditDenied(source, "file.inspect", path, exception);
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private static int analyze(CommandContext<CommandSourceStack> context, String path) {
+        CommandSourceStack source = context.getSource();
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            String contents = agent.files().read(path);
+            DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
+            agent.audit().record(source.getTextName(), "file.analyze",
+                    "path=" + path + " category=" + report.category()
+                            + " severity=" + report.severity()
+                            + " findings=" + report.findings().size());
+            sendBoundedLines(source, report.toText(), 80, 240);
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "file.analyze", path, exception);
             return fail(source, exception.getMessage());
         }
     }
