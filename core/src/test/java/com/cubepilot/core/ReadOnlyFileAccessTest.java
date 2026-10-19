@@ -39,6 +39,7 @@ class ReadOnlyFileAccessTest {
     @Test
     void restrictsDirectoryListingToAllowedRoots() throws IOException {
         Files.createDirectories(serverRoot.resolve("world"));
+        Files.createDirectories(serverRoot.resolve("logs"));
         ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
 
         assertThrows(IOException.class, () -> access.list("world"));

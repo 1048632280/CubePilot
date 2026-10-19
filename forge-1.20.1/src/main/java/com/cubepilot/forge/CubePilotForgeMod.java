@@ -2,7 +2,6 @@ package com.cubepilot.forge;
 
 import com.cubepilot.minecraft.CubePilotCommands;
 import java.util.List;
-import java.util.stream.Collectors;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -21,7 +20,8 @@ public final class CubePilotForgeMod {
     public void onRegisterCommands(RegisterCommandsEvent event) {
         List<String> mods = ModList.get().getMods().stream()
                 .map(mod -> mod.getModId() + " " + mod.getVersion())
-                .sorted(Collectors.toList());
+                .sorted()
+                .toList();
         CubePilotCommands.register(event.getDispatcher(), "Forge", mods);
     }
 }
