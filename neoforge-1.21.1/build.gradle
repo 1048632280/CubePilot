@@ -1,0 +1,48 @@
+plugins {
+    id 'net.neoforged.moddev' version '2.0.78'
+}
+
+version = rootProject.version
+base {
+    archivesName = 'cubepilot-neoforge-1.21.1'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = '21.1.235'
+    runs {
+        server {
+            server()
+            gameDirectory = project.file('run/server')
+            programArgument '--nogui'
+        }
+    }
+    mods {
+        cubepilot {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+}
+
+sourceSets.main.java.srcDir(rootProject.file('common-minecraft/src/main/java'))
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand(version: project.version)
+    }
+}
+
+jar {
+    from(project(':core').sourceSets.main.output)
+}

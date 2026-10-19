@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "cubepilot",
+  "version": "${version}",
+  "name": "CubePilot",
+  "description": "服务端 AI 管理助手：只读诊断与经过校验的命令建议。",
+  "authors": ["CubePilot contributors"],
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.cubepilot.fabric.CubePilotFabricMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "fabric-api": "*",
+    "minecraft": "~1.21.1",
+    "java": ">=21"
+  }
+}

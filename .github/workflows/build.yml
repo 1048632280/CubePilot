@@ -1,0 +1,105 @@
+name: Build Minecraft server mods
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Shared core tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Java 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Run shared core tests
+        run: ./gradlew :core:test --no-daemon
+
+  build:
+    name: ${{ matrix.target.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: Fabric 1.20.1
+            project: fabric-1.20.1
+            java: 17
+            artifact: cubepilot-fabric-1.20.1
+          - name: Forge 1.20.1
+            project: forge-1.20.1
+            java: 17
+            artifact: cubepilot-forge-1.20.1
+          - name: Fabric 1.21.1
+            project: fabric-1.21.1
+            java: 21
+            artifact: cubepilot-fabric-1.21.1
+          - name: NeoForge 1.21.1
+            project: neoforge-1.21.1
+            java: 21
+            artifact: cubepilot-neoforge-1.21.1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Java
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.target.java }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Build server mod
+        env:
+          PROJECT: ${{ matrix.target.project }}
+        run: ./gradlew ":${PROJECT}:build" --no-daemon
+
+      - name: Select distributable JAR
+        env:
+          PROJECT: ${{ matrix.target.project }}
+          ARTIFACT: ${{ matrix.target.artifact }}
+        run: |
+          mkdir -p artifacts
+          mapfile -t jars < <(find "$PROJECT/build/libs" -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-dev.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' | sort)
+          if [ "${#jars[@]}" -ne 1 ]; then
+            printf 'Expected one distributable JAR for %s, found %s: %s\n' \
+              "$PROJECT" "${#jars[@]}" "${jars[*]:-none}" >&2
+            exit 1
+          fi
+          cp "${jars[0]}" "artifacts/${ARTIFACT}.jar"
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.target.artifact }}
+          path: artifacts/${{ matrix.target.artifact }}.jar
+          if-no-files-found: error
+          retention-days: 30

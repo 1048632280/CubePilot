@@ -1,0 +1,64 @@
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+group = rootProject.group
+version = rootProject.version
+
+base {
+    archivesName = 'cubepilot-forge-1.20.1'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+    copyIdeResources = true
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            mods {
+                cubepilot {
+                    source sourceSets.main
+                }
+            }
+        }
+        server {
+            args '--nogui'
+        }
+    }
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.20'
+    implementation project(':core')
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+}
+
+sourceSets.main.java.srcDir(rootProject.file('common-minecraft/src/main/java'))
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') {
+        expand(version: project.version)
+    }
+}
+
+jar {
+    from(project(':core').sourceSets.main.output)
+    manifest {
+        attributes([
+                'Specification-Title': 'cubepilot',
+                'Specification-Vendor': 'CubePilot contributors',
+                'Specification-Version': '1',
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.version,
+                'Implementation-Vendor': 'CubePilot contributors'
+        ])
+    }
+}

@@ -1,0 +1,11 @@
+.gradle/
+**/build/
+**/run/
+**/run-data/
+temp/research/
+temp/build-cache/
+*.iml
+.idea/
+.vscode/
+**/logs/
+**/crash-reports/

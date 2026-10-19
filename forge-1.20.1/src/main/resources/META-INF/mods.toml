@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="cubepilot"
+version="${version}"
+displayName="CubePilot"
+authors="CubePilot contributors"
+description='''
+Server-side AI administration assistant with read-only diagnostics and validated command suggestions.
+'''
+
+[[dependencies.cubepilot]]
+modId="forge"
+mandatory=true
+versionRange="[47.0.0,48)"
+ordering="NONE"
+side="SERVER"
+
+[[dependencies.cubepilot]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+ordering="NONE"
+side="SERVER"
