@@ -6,10 +6,10 @@ CubePilot 是一个只运行在 Minecraft Java 原生专用服务端上的 AI �
 
 | GitHub Artifact | JAR 文件名（当前版本） | Minecraft | 加载器 | Java |
 |---|---|---:|---|---:|
-| `cubepilot-fabric-1.20.1` | `cubepilot-fabric-1.20.1-0.1.0.jar` | 1.20.1 | Fabric | 17 |
-| `cubepilot-forge-1.20.1` | `cubepilot-forge-1.20.1-0.1.0.jar` | 1.20.1 | Forge | 17 |
-| `cubepilot-fabric-1.21.1` | `cubepilot-fabric-1.21.1-0.1.0.jar` | 1.21.1 | Fabric | 21 |
-| `cubepilot-neoforge-1.21.1` | `cubepilot-neoforge-1.21.1-0.1.0.jar` | 1.21.1 | NeoForge | 21 |
+| `cubepilot-fabric-1.20.1` | `cubepilot-fabric-1.20.1.jar` | 1.20.1 | Fabric | 17 |
+| `cubepilot-forge-1.20.1` | `cubepilot-forge-1.20.1.jar` | 1.20.1 | Forge | 17 |
+| `cubepilot-fabric-1.21.1` | `cubepilot-fabric-1.21.1.jar` | 1.21.1 | Fabric | 21 |
+| `cubepilot-neoforge-1.21.1` | `cubepilot-neoforge-1.21.1.jar` | 1.21.1 | NeoForge | 21 |
 
 不支持 Forge 1.21.1、Bukkit/Paper 插件服务器或客户端安装。
 
