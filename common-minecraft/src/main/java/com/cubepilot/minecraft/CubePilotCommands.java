@@ -95,7 +95,7 @@ public final class CubePilotCommands {
                 send(context.getSource(), line);
             }
             return 1;
-        } catch (IOException | IllegalArgumentException exception) {
+        } catch (IllegalArgumentException exception) {
             return fail(context.getSource(), "无法读取服务器状态：" + safeMessage(exception));
         }
     }
