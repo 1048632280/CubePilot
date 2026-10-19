@@ -2,15 +2,21 @@ package com.cubepilot.core;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 public final class ReadOnlyFileAccess {
@@ -21,6 +27,14 @@ public final class ReadOnlyFileAccess {
             ".env", "credentials", "secrets", "server-icon.png", "usercache.json", "whitelist.json",
             "ops.json", "banned-ips.json", "banned-players.json");
     private static final Set<String> ALLOWED_ROOTS = Set.of("config", "logs", "crash-reports");
+    private static final Set<String> SNAPSHOT_PROPERTY_KEYS = Set.of(
+            "allow-flight", "allow-nether", "difficulty", "enable-command-block", "enforce-whitelist",
+            "force-gamemode", "gamemode", "generate-structures", "hardcore", "max-players", "max-tick-time",
+            "online-mode", "pvp", "spawn-protection", "simulation-distance", "view-distance", "white-list");
+    private static final int MAX_INVENTORY_FILES = 80;
+    private static final int MAX_INVENTORY_ENTRIES_VISITED = 512;
+    private static final int MAX_INVENTORY_DEPTH = 5;
+    private static final String CUBEPILOT_CONFIG_PATH = "config/cubepilot";
 
     private final Path serverRoot;
     private final int maxFileBytes;
@@ -81,6 +95,85 @@ public final class ReadOnlyFileAccess {
         return AuditLog.redact(text);
     }
 
+    public Map<String, String> readServerSettingsSnapshot() throws IOException {
+        Path propertiesPath = serverRoot.resolve("server.properties");
+        if (Files.notExists(propertiesPath, LinkOption.NOFOLLOW_LINKS)) {
+            return Map.of();
+        }
+        if (Files.isSymbolicLink(propertiesPath)
+                || !Files.isRegularFile(propertiesPath, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("server.properties 不是普通文件，已跳过快照读取");
+        }
+
+        Properties properties = new Properties();
+        properties.load(new StringReader(read("server.properties")));
+        Map<String, String> safeSettings = new TreeMap<>();
+        for (String key : SNAPSHOT_PROPERTY_KEYS) {
+            String value = properties.getProperty(key);
+            if (value != null && !value.isBlank()) {
+                String safeValue = AuditLog.safeDiagnosticText(value)
+                        .replaceAll("\\p{Cntrl}", " ")
+                        .trim();
+                if (!safeValue.isEmpty()) {
+                    safeSettings.put(key, safeValue.substring(0, Math.min(safeValue.length(), 160)));
+                }
+            }
+        }
+        return Collections.unmodifiableMap(safeSettings);
+    }
+
+    public List<String> configurationInventorySnapshot() {
+        List<String> files = new ArrayList<>();
+        int[] visitedEntries = {0};
+        for (String root : List.of("config", "logs", "crash-reports")) {
+            Path directory = serverRoot.resolve(root);
+            if (Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(directory)) {
+                collectInventory(directory, root, 0, visitedEntries, files);
+            }
+            if (files.size() >= MAX_INVENTORY_FILES || visitedEntries[0] >= MAX_INVENTORY_ENTRIES_VISITED) {
+                break;
+            }
+        }
+        files.sort(String::compareTo);
+        return List.copyOf(files.subList(0, Math.min(files.size(), MAX_INVENTORY_FILES)));
+    }
+
+    private static void collectInventory(Path directory, String relativePath, int depth,
+            int[] visitedEntries, List<String> files) {
+        if (depth > MAX_INVENTORY_DEPTH || files.size() >= MAX_INVENTORY_FILES
+                || visitedEntries[0] >= MAX_INVENTORY_ENTRIES_VISITED) {
+            return;
+        }
+        if (isCubePilotConfigPath(relativePath)) {
+            return;
+        }
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(directory)) {
+            for (Path child : children) {
+                if (++visitedEntries[0] > MAX_INVENTORY_ENTRIES_VISITED) {
+                    return;
+                }
+                if (Files.isSymbolicLink(child)) {
+                    continue;
+                }
+                String name = child.getFileName().toString();
+                if (isDeniedName(name)) {
+                    continue;
+                }
+                String childPath = relativePath + "/" + name;
+                if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
+                    collectInventory(child, childPath, depth + 1, visitedEntries, files);
+                } else if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) && isAllowedFile(name)) {
+                    files.add(childPath);
+                    if (files.size() >= MAX_INVENTORY_FILES) {
+                        return;
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // 无法读取的目录不阻止其他目录进入快照。
+        }
+    }
+
     private Path resolve(String relativePath, boolean directory) throws IOException {
         String requested = relativePath == null || relativePath.isBlank() ? "." : relativePath.trim();
         if (requested.indexOf('\0') >= 0 || requested.contains(":") || requested.startsWith("/") || requested.startsWith("\\")) {
@@ -113,7 +206,7 @@ public final class ReadOnlyFileAccess {
             if (!serverProperties && !ALLOWED_ROOTS.contains(first) && !modsDirectory) {
                 throw new IOException("路径不在允许读取的目录中（config、logs、crash-reports、server.properties）");
             }
-            if (first.equals("config") && normalized.toLowerCase(Locale.ROOT).startsWith("config/cubepilot")) {
+            if (first.equals("config") && isCubePilotConfigPath(normalized)) {
                 throw new IOException("CubePilot 自身配置目录包含凭据，禁止通过聊天读取");
             }
             if (!directory && !serverProperties && !isAllowedFile(resolved.getFileName().toString())) {
@@ -148,6 +241,12 @@ public final class ReadOnlyFileAccess {
         }
         int dot = lower.lastIndexOf('.');
         return dot >= 0 && ALLOWED_EXTENSIONS.contains(lower.substring(dot));
+    }
+
+    private static boolean isCubePilotConfigPath(String relativePath) {
+        String normalized = relativePath.toLowerCase(Locale.ROOT);
+        return normalized.equals(CUBEPILOT_CONFIG_PATH)
+                || normalized.startsWith(CUBEPILOT_CONFIG_PATH + "/");
     }
 
     private static boolean isDeniedName(String name) {

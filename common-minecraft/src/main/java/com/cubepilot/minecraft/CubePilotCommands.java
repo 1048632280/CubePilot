@@ -4,6 +4,7 @@ import com.cubepilot.core.AssistantReply;
 import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
 import com.cubepilot.core.CubePilotAgent;
+import com.cubepilot.core.ReadOnlyFileAccess;
 import com.cubepilot.core.ServerSnapshot;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.ParseResults;
@@ -11,7 +12,9 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletionException;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
@@ -42,6 +45,7 @@ public final class CubePilotCommands {
                 .executes(context -> help(context.getSource()))
                 .then(Commands.literal("help").executes(context -> help(context.getSource())))
                 .then(Commands.literal("status").executes(context -> status(context, loader, mods)))
+                .then(Commands.literal("snapshot").executes(context -> showSnapshot(context, loader, mods)))
                 .then(Commands.literal("mods").executes(context -> showMods(context, mods)))
                 .then(Commands.literal("files")
                         .executes(context -> listFiles(context, ""))
@@ -75,7 +79,8 @@ public final class CubePilotCommands {
     private static int help(CommandSourceStack source) {
         send(source, "命令别名：/cp、/cpilot、/cpa（需要 OP 2 级权限）");
         send(source, "/cp <问题> 或 /cp ask <问题>：查询百科/服务器状态并生成命令建议");
-        send(source, "/cp status | mods：查看服务器状态或已加载 Mod");
+        send(source, "/cp status | mods：查看简要服务器状态或已加载 Mod");
+        send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
         send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
         send(source, "命令建议只会显示为可点击的聊天文本：点击填入命令框后，必须由你手动按回车执行。");
@@ -84,11 +89,31 @@ public final class CubePilotCommands {
 
     private static int status(CommandContext<CommandSourceStack> context,
             String loader, List<String> mods) {
-        ServerSnapshot snapshot = snapshot(context.getSource().getServer(), loader, mods);
-        for (String line : snapshot.toPromptText().split("\\n")) {
-            send(context.getSource(), line);
+        try {
+            ServerSnapshot snapshot = runtimeSnapshot(context.getSource().getServer(), loader, mods);
+            for (String line : snapshot.toStatusText().split("\\n")) {
+                send(context.getSource(), line);
+            }
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            return fail(context.getSource(), "无法读取服务器状态：" + safeMessage(exception));
         }
-        return 1;
+    }
+
+    private static int showSnapshot(CommandContext<CommandSourceStack> context,
+            String loader, List<String> mods) {
+        CommandSourceStack source = context.getSource();
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            ServerSnapshot snapshot = snapshot(source.getServer(), loader, mods, agent.files());
+            agent.audit().record(source.getTextName(), "snapshot.capture",
+                    "settings=" + snapshot.serverSettings().size()
+                            + " files=" + snapshot.configurationFiles().size());
+            sendBoundedLines(source, snapshot.toPromptText(), 120, 240);
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            return fail(source, "无法生成只读服务器快照：" + safeMessage(exception));
+        }
     }
 
     private static int showMods(CommandContext<CommandSourceStack> context, List<String> mods) {
@@ -166,7 +191,12 @@ public final class CubePilotCommands {
         } catch (IOException | IllegalArgumentException exception) {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
-        ServerSnapshot snapshot = snapshot(source.getServer(), loader, mods);
+        ServerSnapshot snapshot;
+        try {
+            snapshot = snapshot(source.getServer(), loader, mods, agent.files());
+        } catch (IOException | IllegalArgumentException exception) {
+            return fail(source, "无法生成服务器上下文：" + safeMessage(exception));
+        }
         agent.audit().record(source.getTextName(), "request.start", "question_length=" + question.length());
         send(source, "正在联系配置的 OpenAI 兼容 API；等待期间服务器线程不会被阻塞。");
         agent.ask(question, attachedContext, snapshot).whenComplete((reply, error) -> source.getServer().execute(() -> {
@@ -212,10 +242,19 @@ public final class CubePilotCommands {
         }
     }
 
-    private static ServerSnapshot snapshot(MinecraftServer server, String loader, List<String> mods) {
+    private static ServerSnapshot runtimeSnapshot(MinecraftServer server, String loader, List<String> mods) {
+        return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader,
+                server.overworld().getDifficulty().getDisplayName().getString(),
+                server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(),
+                Map.of(), List.of(), mods);
+    }
+
+    private static ServerSnapshot snapshot(MinecraftServer server, String loader, List<String> mods,
+            ReadOnlyFileAccess files) throws IOException {
         String difficulty = server.overworld().getDifficulty().getDisplayName().getString();
-        return new ServerSnapshot(SharedConstants.getCurrentVersion().getName(), loader, difficulty,
-                server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(), mods);
+        return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader, difficulty,
+                server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(),
+                files.readServerSettingsSnapshot(), files.configurationInventorySnapshot(), mods);
     }
 
     private static void sendBoundedLines(CommandSourceStack source, String text, int maxLines, int maxLineLength) {
