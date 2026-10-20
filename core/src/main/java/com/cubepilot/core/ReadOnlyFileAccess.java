@@ -140,64 +140,11 @@ public final class ReadOnlyFileAccess {
         return List.copyOf(files.subList(0, Math.min(files.size(), MAX_INVENTORY_FILES)));
     }
 
-    public List<String> findModConfigurationFiles(String modId) {
-        return findModConfigurationFiles(modId, "");
-    }
-
-    public List<String> findModConfigurationFiles(String modId, String displayName) {
-        if (modId == null || !modId.matches("[A-Za-z0-9_.-]{1,64}")) {
-            throw new IllegalArgumentException("Mod ID 只能包含字母、数字、点、下划线和连字符");
-        }
-        String lowerId = modId.toLowerCase(Locale.ROOT);
-        String compactId = lowerId.replace(".", "").replace("_", "").replace("-", "");
-        String lowerName = displayName == null ? "" : displayName.toLowerCase(Locale.ROOT).trim();
-        String compactName = lowerName.replaceAll("[^\\p{L}\\p{N}]", "");
-        List<String> matches = new ArrayList<>();
-        for (String path : configurationInventorySnapshot()) {
-            if (!isConfigurationPath(path)) {
-                continue;
-            }
-            String lowerPath = path.toLowerCase(Locale.ROOT);
-            String compactPath = lowerPath.replace(".", "").replace("_", "").replace("-", "");
-            if (lowerPath.contains(lowerId) || compactPath.contains(compactId)
-                    || (!compactName.isBlank() && compactPath.contains(compactName))) {
-                matches.add(path);
-            }
-        }
-        return List.copyOf(matches);
-    }
-
-    /** 根据自然语言在只读配置清单中挑选可能相关的配置文件。 */
-    public List<String> searchConfigurationFiles(String query, int limit) throws IOException {
-        String normalizedQuery = normalizeSearchText(query);
-        if (normalizedQuery.isBlank()) {
-            return List.of();
-        }
-        List<ScoredPath> scored = new ArrayList<>();
-        for (String path : configurationInventorySnapshot()) {
-            if (!isConfigurationPath(path)) {
-                continue;
-            }
-            String contents;
-            try {
-                contents = read(path);
-            } catch (IOException ignored) {
-                continue;
-            }
-            String normalizedPath = normalizeSearchText(path);
-            int score = overlapScore(normalizedQuery, normalizedPath) * 4;
-            ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
-            for (ConfigInspector.Entry entry : document.entries()) {
-                score += overlapScore(normalizedQuery, normalizeSearchText(entry.path() + " " + entry.value()));
-            }
-            if (score > 0) {
-                scored.add(new ScoredPath(path, score));
-            }
-        }
-        scored.sort(java.util.Comparator.comparingInt(ScoredPath::score).reversed()
-                .thenComparing(ScoredPath::path));
-        return scored.stream().limit(Math.max(1, Math.min(limit, 20)))
-                .map(ScoredPath::path).toList();
+    /** 仅返回配置目录中的白名单文件，供一次性的模型配置分析使用。 */
+    public List<String> configurationFilesSnapshot() {
+        return configurationInventorySnapshot().stream()
+                .filter(ReadOnlyFileAccess::isConfigurationPath)
+                .toList();
     }
 
     private static void collectInventory(Path directory, String relativePath, int depth,
@@ -338,48 +285,6 @@ public final class ReadOnlyFileAccess {
         }
         return lower.equals("world/serverconfig")
                 || lower.startsWith("world/serverconfig/");
-    }
-
-    private static String normalizeSearchText(String value) {
-        if (value == null) {
-            return "";
-        }
-        String lower = value.toLowerCase(Locale.ROOT);
-        String normalized = lower.replaceAll("[^\\p{L}\\p{N}]", "");
-        StringBuilder aliases = new StringBuilder(normalized);
-        if (lower.contains("死亡") || lower.contains("死后")) {
-            aliases.append("death");
-        }
-        if (lower.contains("掉血") || lower.contains("伤害")) {
-            aliases.append("damage");
-        }
-        if (lower.contains("关闭") || lower.contains("禁用") || lower.contains("取消")) {
-            aliases.append("disablefalseoffzero");
-        }
-        if (lower.contains("开启") || lower.contains("启用")) {
-            aliases.append("enabletrueon");
-        }
-        if (lower.contains("掉落") || lower.contains("掉东西")) {
-            aliases.append("dropitemloot");
-        }
-        return aliases.toString();
-    }
-
-    private static int overlapScore(String query, String candidate) {
-        if (candidate.isBlank()) {
-            return 0;
-        }
-        int score = query.contains(candidate) || candidate.contains(query) ? 3 : 0;
-        for (int start = 0; start + 2 <= query.length(); start++) {
-            String part = query.substring(start, start + 2);
-            if (candidate.contains(part)) {
-                score++;
-            }
-        }
-        return score;
-    }
-
-    private record ScoredPath(String path, int score) {
     }
 
     private static boolean isDeniedName(String name) {

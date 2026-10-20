@@ -17,11 +17,9 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
@@ -34,6 +32,7 @@ import net.minecraft.server.MinecraftServer;
 public final class CubePilotCommands {
     private static final List<String> ROOTS = List.of("cp", "cpilot", "cpa");
     private static final String PREFIX = "[CubePilot] ";
+    private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
 
     private CubePilotCommands() {
     }
@@ -222,23 +221,11 @@ public final class CubePilotCommands {
     private static int configRequest(CommandContext<CommandSourceStack> context, String loader,
             List<ModInfo> mods, String request) {
         CommandSourceStack source = context.getSource();
-        String normalized = request == null ? "" : request.trim();
-        if (normalized.isBlank() || normalized.length() > 4000) {
+        String question = request == null ? "" : request.trim();
+        if (question.isBlank() || question.length() > 4000) {
             return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
         }
-        String firstToken = normalized.split("\\s+", 2)[0];
-        ModInfo explicit = mods.stream()
-                .filter(mod -> mod.id().equalsIgnoreCase(firstToken))
-                .findFirst().orElse(null);
-        if (explicit != null) {
-            String remainder = normalized.length() == firstToken.length()
-                    ? "" : normalized.substring(firstToken.length()).trim();
-            if (remainder.isBlank()) {
-                return showModConfig(context, explicit.id());
-            }
-            return askModConfig(context, loader, mods, explicit.id(), remainder);
-        }
-        return askDiscoveredModConfig(context, loader, mods, normalized);
+        return askDiscoveredModConfig(context, loader, mods, question);
     }
 
     private static int askDiscoveredModConfig(CommandContext<CommandSourceStack> context, String loader,
@@ -246,18 +233,39 @@ public final class CubePilotCommands {
         CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
-            String attachedContext = discoverConfigContext(agent.files(), mods, question);
+            ServerSnapshot snapshot = snapshot(source.getServer(), loader, mods, agent.files());
             agent.audit().record(source.getTextName(), "config.auto-discover",
-                    "question_length=" + question.length()
-                            + " context_length=" + attachedContext.length());
-            return ask(context, loader, mods,
-                    "请自动识别我描述的 Mod，并在只读配置中回答：" + question, attachedContext);
+                    "question_length=" + question.length());
+            send(source, "正在异步扫描全部白名单 Mod 配置，并交给模型判断；不会读取凭据或修改文件。");
+            CompletableFuture.supplyAsync(() -> {
+                try {
+                    return discoverAllConfigContext(agent.files(), mods, question);
+                } catch (IOException exception) {
+                    throw new CompletionException(exception);
+                }
+            }).thenCompose(attachedContext -> {
+                agent.audit().record(source.getTextName(), "config.scan.complete",
+                        "context_length=" + attachedContext.length());
+                return agent.ask("请从广泛扫描的只读配置中自行识别 Mod 和相关设置，并回答：" + question,
+                        attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS);
+            }).whenComplete((reply, error) -> source.getServer().execute(() -> {
+                if (error != null) {
+                    agent.audit().record(source.getTextName(), "config.request.error", safeMessage(error));
+                    send(source, "配置分析失败：" + safeMessage(error));
+                    return;
+                }
+                agent.audit().record(source.getTextName(), "config.request.complete",
+                        "answer_length=" + reply.answer().length());
+                renderReply(source, agent, reply);
+            }));
+            return 1;
         } catch (IOException | IllegalArgumentException exception) {
             auditDenied(source, "config.auto-discover", question, exception);
             return fail(source, "自动检索配置失败：" + safeMessage(exception));
         }
     }
 
+    /* 已由无关键词的广泛扫描替代。
     private static String discoverConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
             String question) throws IOException {
         List<ConfigCandidate> candidates = new ArrayList<>();
@@ -324,92 +332,70 @@ public final class CubePilotCommands {
         return context.toString();
     }
 
-    private static int relevance(String question, String path, ConfigInspector.ConfigDocument document) {
-        String normalizedQuestion = normalizeSearch(question);
-        int score = overlap(normalizedQuestion, normalizeSearch(path)) * 4;
-        for (ConfigInspector.Entry entry : document.entries()) {
-            score += overlap(normalizedQuestion, normalizeSearch(entry.path() + " " + entry.value()));
+    */
+    private static String discoverAllConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
+            String question) throws IOException {
+        List<String> paths = files.configurationFilesSnapshot();
+        StringBuilder context = new StringBuilder("Mod 配置广泛扫描上下文（只读、未做关键词筛选）：\n")
+                .append("用户问题：").append(question)
+                .append("\n已加载 Mod（ID / 显示名 / 版本）：\n");
+        mods.stream().limit(160).forEach(mod -> context.append("- ").append(mod.displayText()).append('\n'));
+        context.append("\n扫描目录：config/、defaultconfigs/、world/serverconfig/")
+                .append("\n发现配置文件：").append(paths.size()).append(" 个\n");
+        if (paths.isEmpty()) {
+            context.append("未发现可读取的配置文件。请明确说明没有证据，不能编造路径或键名。\n");
+            return context.toString();
         }
-        return score;
-    }
 
-    private static int overlap(String query, String candidate) {
-        if (query.isBlank() || candidate.isBlank()) {
-            return 0;
-        }
-        int score = query.contains(candidate) || candidate.contains(query) ? 8 : 0;
-        for (int index = 0; index + 2 <= query.length(); index++) {
-            if (candidate.contains(query.substring(index, index + 2))) {
-                score++;
+        context.append("全部文件路径：\n");
+        paths.forEach(path -> context.append("- ").append(path).append('\n'));
+        int footerReserve = 500;
+        int available = Math.max(0, MAX_CONFIG_CONTEXT_CHARS - context.length() - footerReserve);
+        int perFileBudget = Math.max(180, Math.min(6000, available / paths.size()));
+        context.append("\n各文件配置摘要（每个文件公平分配上下文，不按问题相关度排序）：\n");
+        for (String path : paths) {
+            if (context.length() >= MAX_CONFIG_CONTEXT_CHARS - footerReserve) {
+                break;
             }
+            appendConfigSummary(context, files, path, perFileBudget);
         }
-        return score;
+        context.append("请由模型自行判断用户指的是哪个 Mod、文件和设置，不要依赖预设关键词。"
+                + "只根据所给证据回答：指出文件路径、行号、键路径和当前值，给出手工修改示例；"
+                + "证据不足时明确说明，不得编造。\n");
+        return context.toString();
     }
 
-    private static String normalizeSearch(String value) {
-        return value == null ? "" : value.toLowerCase(Locale.ROOT)
-                .replaceAll("[^\\p{L}\\p{N}]", "");
-    }
-
-    private record ConfigCandidate(ModInfo mod, String path, ConfigInspector.ConfigDocument document,
-            String contents, int score) {
-    }
-
-    private static int showModConfig(CommandContext<CommandSourceStack> context, String modId) {
-        CommandSourceStack source = context.getSource();
+    private static void appendConfigSummary(StringBuilder context, ReadOnlyFileAccess files,
+            String path, int budget) {
+        int start = context.length();
+        context.append("\n文件：").append(path).append('\n');
         try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            List<String> paths = agent.files().findModConfigurationFiles(modId);
-            agent.audit().record(source.getTextName(), "config.locate", "mod=" + modId + " files=" + paths.size());
-            if (paths.isEmpty()) {
-                return fail(source, "没有在 config/、defaultconfigs/ 或 world/serverconfig/ 白名单目录中找到匹配的配置文件。");
-            }
-            send(source, "找到 " + paths.size() + " 个候选配置文件（只读）：");
-            for (String path : paths) {
-                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, agent.files().read(path));
-                sendBoundedLines(source, document.toSummary(), 100, 240);
-            }
-            send(source, "以上只是配置键和值的只读摘要；模组不会替你写回文件。");
-            return 1;
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "config.locate", modId, exception);
-            return fail(source, exception.getMessage());
-        }
-    }
-
-    private static int askModConfig(CommandContext<CommandSourceStack> context, String loader,
-            List<ModInfo> mods, String modId, String question) {
-        CommandSourceStack source = context.getSource();
-        if (question == null || question.isBlank() || question.length() > 4000) {
-            return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
-        }
-        try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            List<String> paths = agent.files().findModConfigurationFiles(modId);
-            if (paths.isEmpty()) {
-                return fail(source, "没有在 config/、defaultconfigs/ 或 world/serverconfig/ 白名单目录中找到匹配的配置文件。");
-            }
-            StringBuilder contextText = new StringBuilder("目标 Mod ID：").append(modId)
-                    .append("\n以下是自动定位到的只读配置候选；请根据键路径、当前值和原文回答手工修改方法。"
-                            + "不要声称已经修改，也不要输出自动写文件指令。\n");
-            for (String path : paths) {
-                String contents = agent.files().read(path);
-                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
-                contextText.append("\n").append(document.toSummary())
-                        .append("\n脱敏原文（仅用于定位上下文）：\n");
-                int remaining = 14000 - contextText.length();
-                if (remaining <= 0) {
-                    break;
+            ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, files.read(path));
+            context.append("格式：").append(document.format()).append('\n');
+            if (document.entries().isEmpty()) {
+                context.append("（没有识别到结构化键值）\n");
+            } else {
+                for (ConfigInspector.Entry entry : document.entries()) {
+                    if (context.length() - start >= budget) {
+                        context.append("…\n");
+                        break;
+                    }
+                    context.append("- ");
+                    if (entry.line() > 0) {
+                        context.append("第").append(entry.line()).append("行 ");
+                    }
+                    context.append(entry.path()).append(" = ").append(entry.value()).append('\n');
                 }
-                contextText.append(contents, 0, Math.min(contents.length(), Math.min(6000, remaining)));
             }
-            agent.audit().record(source.getTextName(), "config.ask",
-                    "mod=" + modId + " files=" + paths.size() + " question_length=" + question.length());
-            return ask(context, loader, mods,
-                    "我想调整 Mod " + modId + " 的配置。请回答：" + question, contextText.toString());
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "config.ask", modId, exception);
-            return fail(source, exception.getMessage());
+            if (context.length() - start > budget) {
+                context.setLength(start + budget);
+                context.append("…\n");
+            }
+        } catch (IOException exception) {
+            context.append("读取失败：").append(safeMessage(exception)).append('\n');
+            if (context.length() - start > budget) {
+                context.setLength(start + budget);
+            }
         }
     }
 
@@ -425,7 +411,6 @@ public final class CubePilotCommands {
         } catch (IOException | IllegalArgumentException exception) {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
-        attachedContext = attachMatchingModConfig(agent, source.getTextName(), mods, question, attachedContext);
         ServerSnapshot snapshot;
         try {
             snapshot = snapshot(source.getServer(), loader, mods, agent.files());
@@ -444,56 +429,6 @@ public final class CubePilotCommands {
             renderReply(source, agent, reply);
         }));
         return 1;
-    }
-
-    private static String attachMatchingModConfig(CubePilotAgent agent, String actor, List<ModInfo> mods,
-            String question, String attachedContext) {
-        if (attachedContext != null && !attachedContext.isBlank()) {
-            return attachedContext;
-        }
-        String lowerQuestion = question.toLowerCase(java.util.Locale.ROOT);
-        boolean configIntent = lowerQuestion.contains("配置") || lowerQuestion.contains("设置")
-                || lowerQuestion.contains("config") || lowerQuestion.contains("toml")
-                || lowerQuestion.contains("yaml") || lowerQuestion.contains("json");
-        if (!configIntent) {
-            return "";
-        }
-        StringBuilder context = new StringBuilder();
-        for (ModInfo mod : mods) {
-            String modId = mod.id();
-            if (modId.length() < 2 || !mod.matches(question)) {
-                continue;
-            }
-            List<String> paths;
-            try {
-                paths = agent.files().findModConfigurationFiles(modId, mod.name());
-            } catch (IllegalArgumentException ignored) {
-                continue;
-            }
-            for (String path : paths) {
-                try {
-                    String contents = agent.files().read(path);
-                    ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
-                    if (context.length() == 0) {
-                        context.append("自动定位的 Mod 配置（仅本次显式请求读取）：\n");
-                    }
-                    context.append("\n").append(document.toSummary())
-                            .append("\n脱敏原文：\n");
-                    int remaining = 10000 - context.length();
-                    if (remaining <= 0) {
-                        return context.toString();
-                    }
-                    context.append(contents, 0, Math.min(contents.length(), Math.min(5000, remaining)));
-                } catch (IOException ignored) {
-                    // 单个候选文件不可读取时，不扩大读取范围。
-                }
-            }
-        }
-        if (context.length() > 0) {
-            agent.audit().record(actor, "config.auto-locate", "question_length=" + question.length());
-            return context.toString();
-        }
-        return "";
     }
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent, AssistantReply reply) {

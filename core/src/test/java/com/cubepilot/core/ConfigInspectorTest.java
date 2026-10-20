@@ -52,11 +52,11 @@ class ConfigInspectorTest {
         Files.writeString(serverRoot.resolve("config/cubepilot/cubepilot.properties"), "api.key=hidden\n");
         ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
 
-        assertEquals(List.of("config/examplemod-client.toml", "config/examplemod.toml"),
-                access.findModConfigurationFiles("examplemod"));
-        assertTrue(access.findModConfigurationFiles("othermod").contains("config/othermod.toml"));
-        assertFalse(access.findModConfigurationFiles("cubepilot").stream()
-                .anyMatch(path -> path.contains("cubepilot")));
+        assertEquals(List.of("config/examplemod-client.toml", "config/examplemod.toml", "config/othermod.toml"),
+                access.configurationFilesSnapshot());
+        assertTrue(access.configurationFilesSnapshot().contains("config/othermod.toml"));
+        assertFalse(access.configurationFilesSnapshot().stream()
+                .anyMatch(path -> path.contains("config/cubepilot/")));
     }
 
     @Test
@@ -70,10 +70,8 @@ class ConfigInspectorTest {
 
         ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
 
-        assertTrue(access.findModConfigurationFiles("ringmod", "七咒之戒").contains(
-                "defaultconfigs/ringmod-server.toml"));
-        assertEquals(List.of("defaultconfigs/ringmod-server.toml"),
-                access.searchConfigurationFiles("关闭死亡掉血", 1));
+        assertEquals(List.of("defaultconfigs/ringmod-server.toml", "world/serverconfig/ringmod.json"),
+                access.configurationFilesSnapshot());
     }
 
     private static ConfigInspector.Entry find(List<ConfigInspector.Entry> entries, String path) {

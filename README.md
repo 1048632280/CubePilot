@@ -43,11 +43,11 @@ files.max-bytes=16384
 - `/cp files [目录]`：列出只读允许目录。
 - `/cp read <相对路径>`：读取并做常见凭据脱敏。
 - `/cp analyze <路径>`：使用本地规则离线分析日志、崩溃报告或配置，不调用外部 API。
-- `/cp config <Mod ID>`：在 `config/` 中定位该 Mod 的候选配置并解析键路径；追加问题可让 AI 说明如何手工修改。
+- `/cp config <自然语言问题>`：显式触发对配置白名单的广泛只读扫描，由 AI 自行识别 Mod、文件和配置项。
 - `/cp inspect <路径>`、`/cp diagnose <路径> <问题>`：让 AI 分析日志、崩溃报告或配置文件。
 - `/cpilot` 和 `/cpa` 是相同功能的别名。
 
-默认只允许读取 `config/`、`logs/`、`crash-reports/`、`server.properties`，以及列出 `mods/` 中的 JAR 名称。`/cp snapshot` 只提取 `server.properties` 中明确列出的非敏感字段，并只枚举白名单目录下文本文件的路径，不保存快照或修改服务端文件；`/cp config` 只定位和解析配置键，不提供写回能力。普通 `/cp` 问题只有同时提到已加载 Mod ID 和配置意图时，才会在本次请求中自动定位该 Mod 配置，不会后台扫描。`/cp analyze` 只做本地规则诊断，识别异常堆栈、Mixin/Mod 冲突、端口绑定、卡顿、内存耗尽和部分配置风险，不把规则命中当作确定根因，也不会自动修复。所有处理都由玩家显式输入 `/cp`、`/cpilot` 或 `/cpa` 后触发，不后台监视、不持续上传日志。快照、配置查询和诊断操作本身会按审计要求写入 CubePilot 审计日志。拒绝路径穿越、符号链接、CubePilot 自身凭据目录、密钥/证书、玩家数据、世界存档和超限文件。外部百科检索暂不启用。
+默认只允许读取 `config/`、`defaultconfigs/`、`world/serverconfig/`、`logs/`、`crash-reports/`、`server.properties`，以及列出 `mods/` 中的 JAR 名称。`/cp snapshot` 只提取 `server.properties` 中明确列出的非敏感字段，并只枚举白名单目录下文本文件的路径，不保存快照或修改服务端文件；`/cp config` 只在玩家显式请求后广泛扫描配置摘要，不提供写回能力。普通 `/cp` 不会隐式扫描配置，也不后台监视。`/cp analyze` 只做本地规则诊断，识别异常堆栈、Mixin/Mod 冲突、端口绑定、卡顿、内存耗尽和部分配置风险，不把规则命中当作确定根因，也不会自动修复。所有处理都由玩家显式输入 `/cp`、`/cpilot` 或 `/cpa` 后触发，不后台监视、不持续上传日志。快照、配置查询和诊断操作本身会按审计要求写入 CubePilot 审计日志。拒绝路径穿越、符号链接、CubePilot 自身凭据目录、密钥/证书、玩家数据、世界存档和超限文件。外部百科检索暂不启用。
 
 ## 命令建议安全边界
 
