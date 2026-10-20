@@ -138,6 +138,26 @@ public final class ReadOnlyFileAccess {
         return List.copyOf(files.subList(0, Math.min(files.size(), MAX_INVENTORY_FILES)));
     }
 
+    public List<String> findModConfigurationFiles(String modId) {
+        if (modId == null || !modId.matches("[A-Za-z0-9_.-]{1,64}")) {
+            throw new IllegalArgumentException("Mod ID 只能包含字母、数字、点、下划线和连字符");
+        }
+        String lowerId = modId.toLowerCase(Locale.ROOT);
+        String compactId = lowerId.replace(".", "").replace("_", "").replace("-", "");
+        List<String> matches = new ArrayList<>();
+        for (String path : configurationInventorySnapshot()) {
+            if (!path.toLowerCase(Locale.ROOT).startsWith("config/")) {
+                continue;
+            }
+            String lowerPath = path.toLowerCase(Locale.ROOT);
+            String compactPath = lowerPath.replace(".", "").replace("_", "").replace("-", "");
+            if (lowerPath.contains(lowerId) || compactPath.contains(compactId)) {
+                matches.add(path);
+            }
+        }
+        return List.copyOf(matches);
+    }
+
     private static void collectInventory(Path directory, String relativePath, int depth,
             int[] visitedEntries, List<String> files) {
         if (depth > MAX_INVENTORY_DEPTH || files.size() >= MAX_INVENTORY_FILES

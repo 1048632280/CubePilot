@@ -3,6 +3,7 @@ package com.cubepilot.minecraft;
 import com.cubepilot.core.AssistantReply;
 import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
+import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.DiagnosticAnalyzer;
 import com.cubepilot.core.DiagnosticReport;
@@ -62,6 +63,14 @@ public final class CubePilotCommands {
                         .then(Commands.argument("path", StringArgumentType.word())
                                 .executes(context -> analyze(context,
                                         StringArgumentType.getString(context, "path")))))
+                .then(Commands.literal("config")
+                        .then(Commands.argument("mod", StringArgumentType.word())
+                                .executes(context -> showModConfig(context,
+                                        StringArgumentType.getString(context, "mod")))
+                                .then(Commands.argument("question", StringArgumentType.greedyString())
+                                        .executes(context -> askModConfig(context, loader, mods,
+                                                StringArgumentType.getString(context, "mod"),
+                                                StringArgumentType.getString(context, "question"))))))
                 .then(Commands.literal("inspect")
                         .then(Commands.argument("path", StringArgumentType.word())
                                 .executes(context -> inspect(context, loader, mods,
@@ -89,6 +98,7 @@ public final class CubePilotCommands {
         send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
         send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
+        send(source, "/cp config <Mod ID> [问题]：定位并解析该 Mod 配置，回答手工修改方法，不会写文件");
         send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
         send(source, "命令建议只会显示为可点击的聊天文本：点击填入命令框后，必须由你手动按回车执行。");
         return 1;
@@ -209,6 +219,64 @@ public final class CubePilotCommands {
         }
     }
 
+    private static int showModConfig(CommandContext<CommandSourceStack> context, String modId) {
+        CommandSourceStack source = context.getSource();
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            List<String> paths = agent.files().findModConfigurationFiles(modId);
+            agent.audit().record(source.getTextName(), "config.locate", "mod=" + modId + " files=" + paths.size());
+            if (paths.isEmpty()) {
+                return fail(source, "没有在 config/ 白名单目录中找到与 Mod ID 匹配的配置文件。");
+            }
+            send(source, "找到 " + paths.size() + " 个候选配置文件（只读）：");
+            for (String path : paths) {
+                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, agent.files().read(path));
+                sendBoundedLines(source, document.toSummary(), 100, 240);
+            }
+            send(source, "以上只是配置键和值的只读摘要；模组不会替你写回文件。");
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "config.locate", modId, exception);
+            return fail(source, exception.getMessage());
+        }
+    }
+
+    private static int askModConfig(CommandContext<CommandSourceStack> context, String loader,
+            List<String> mods, String modId, String question) {
+        CommandSourceStack source = context.getSource();
+        if (question == null || question.isBlank() || question.length() > 4000) {
+            return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
+        }
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            List<String> paths = agent.files().findModConfigurationFiles(modId);
+            if (paths.isEmpty()) {
+                return fail(source, "没有在 config/ 白名单目录中找到与 Mod ID 匹配的配置文件。");
+            }
+            StringBuilder contextText = new StringBuilder("目标 Mod ID：").append(modId)
+                    .append("\n以下是自动定位到的只读配置候选；请根据键路径、当前值和原文回答手工修改方法。"
+                            + "不要声称已经修改，也不要输出自动写文件指令。\n");
+            for (String path : paths) {
+                String contents = agent.files().read(path);
+                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
+                contextText.append("\n").append(document.toSummary())
+                        .append("\n脱敏原文（仅用于定位上下文）：\n");
+                int remaining = 14000 - contextText.length();
+                if (remaining <= 0) {
+                    break;
+                }
+                contextText.append(contents, 0, Math.min(contents.length(), Math.min(6000, remaining)));
+            }
+            agent.audit().record(source.getTextName(), "config.ask",
+                    "mod=" + modId + " files=" + paths.size() + " question_length=" + question.length());
+            return ask(context, loader, mods,
+                    "我想调整 Mod " + modId + " 的配置。请回答：" + question, contextText.toString());
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "config.ask", modId, exception);
+            return fail(source, exception.getMessage());
+        }
+    }
+
     private static int ask(CommandContext<CommandSourceStack> context, String loader,
             List<String> mods, String question, String attachedContext) {
         CommandSourceStack source = context.getSource();
@@ -221,6 +289,7 @@ public final class CubePilotCommands {
         } catch (IOException | IllegalArgumentException exception) {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
+        attachedContext = attachMatchingModConfig(agent, source.getTextName(), mods, question, attachedContext);
         ServerSnapshot snapshot;
         try {
             snapshot = snapshot(source.getServer(), loader, mods, agent.files());
@@ -239,6 +308,56 @@ public final class CubePilotCommands {
             renderReply(source, agent, reply);
         }));
         return 1;
+    }
+
+    private static String attachMatchingModConfig(CubePilotAgent agent, String actor, List<String> mods,
+            String question, String attachedContext) {
+        if (attachedContext != null && !attachedContext.isBlank()) {
+            return attachedContext;
+        }
+        String lowerQuestion = question.toLowerCase(java.util.Locale.ROOT);
+        boolean configIntent = lowerQuestion.contains("配置") || lowerQuestion.contains("设置")
+                || lowerQuestion.contains("config") || lowerQuestion.contains("toml")
+                || lowerQuestion.contains("yaml") || lowerQuestion.contains("json");
+        if (!configIntent) {
+            return "";
+        }
+        StringBuilder context = new StringBuilder();
+        for (String modEntry : mods) {
+            String modId = modEntry.split("\\s+", 2)[0];
+            if (modId.length() < 2 || !lowerQuestion.contains(modId.toLowerCase(java.util.Locale.ROOT))) {
+                continue;
+            }
+            List<String> paths;
+            try {
+                paths = agent.files().findModConfigurationFiles(modId);
+            } catch (IllegalArgumentException ignored) {
+                continue;
+            }
+            for (String path : paths) {
+                try {
+                    String contents = agent.files().read(path);
+                    ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
+                    if (context.length() == 0) {
+                        context.append("自动定位的 Mod 配置（仅本次显式请求读取）：\n");
+                    }
+                    context.append("\n").append(document.toSummary())
+                            .append("\n脱敏原文：\n");
+                    int remaining = 10000 - context.length();
+                    if (remaining <= 0) {
+                        return context.toString();
+                    }
+                    context.append(contents, 0, Math.min(contents.length(), Math.min(5000, remaining)));
+                } catch (IOException ignored) {
+                    // 单个候选文件不可读取时，不扩大读取范围。
+                }
+            }
+        }
+        if (context.length() > 0) {
+            agent.audit().record(actor, "config.auto-locate", "question_length=" + question.length());
+            return context.toString();
+        }
+        return "";
     }
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent, AssistantReply reply) {

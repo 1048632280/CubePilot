@@ -33,4 +33,16 @@ class CommandPolicyTest {
         assertNull(CommandPolicy.validateSuggestion("stop", ALLOWED));
         assertNull(CommandPolicy.validateSuggestion("say hello", ALLOWED));
     }
+
+    @Test
+    void validatesComplexGiveNbtAndRejectsDangerousPayloads() {
+        assertEquals("/give @s minecraft:diamond{display:{Name:'{\"text\":\"宝石\"}'}} 1",
+                CommandPolicy.validateSuggestion(
+                        "give @s minecraft:diamond{display:{Name:'{\"text\":\"宝石\"}'}} 1", ALLOWED));
+        assertNull(CommandPolicy.validateSuggestion("give @s minecraft:diamond{display:{Name:'broken'} 1", ALLOWED));
+        assertNull(CommandPolicy.validateSuggestion("give @s minecraft:command_block 1", ALLOWED));
+        assertNull(CommandPolicy.validateSuggestion("give @s minecraft:stone{EntityTag:{id:\"x\"}} 1", ALLOWED));
+        assertNull(CommandPolicy.validateSuggestion(
+                "give @s minecraft:stone[minecraft:block_entity_data={Command:'say hi'}] 1", ALLOWED));
+    }
 }
