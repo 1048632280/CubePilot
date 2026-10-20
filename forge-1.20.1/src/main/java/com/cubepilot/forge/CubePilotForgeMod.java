@@ -20,7 +20,7 @@ public final class CubePilotForgeMod {
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         List<ModInfo> mods = ModList.get().getMods().stream()
-                .map(mod -> new ModInfo(mod.getModId(), mod.getDisplayName(), mod.getVersion()))
+                .map(mod -> new ModInfo(mod.getModId(), mod.getDisplayName(), mod.getVersion().toString()))
                 .sorted(java.util.Comparator.comparing(ModInfo::id))
                 .toList();
         CubePilotCommands.register(event.getDispatcher(), "Forge", mods);

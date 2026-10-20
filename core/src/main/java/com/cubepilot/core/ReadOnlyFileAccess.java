@@ -336,7 +336,7 @@ public final class ReadOnlyFileAccess {
         if (ALLOWED_ROOTS.stream().anyMatch(root -> lower.equals(root) || lower.startsWith(root + "/"))) {
             return true;
         }
-        return lower.equals("world") || lower.equals("world/serverconfig")
+        return lower.equals("world/serverconfig")
                 || lower.startsWith("world/serverconfig/");
     }
 
