@@ -64,42 +64,109 @@ public final class OpenAiClient {
     }
 
     private static AssistantReply parseReply(String body) {
-        JsonObject root = JsonParser.parseString(body).getAsJsonObject();
-        JsonArray choices = root.getAsJsonArray("choices");
-        if (choices == null || choices.isEmpty()) {
-            throw new java.util.concurrent.CompletionException(new IOException("模型接口没有返回内容"));
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices == null || choices.isEmpty()) {
+                throw new java.util.concurrent.CompletionException(new IOException("模型接口没有返回内容"));
+            }
+            JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
+            JsonElement contentElement = message == null ? null : message.get("content");
+            if (contentElement == null || contentElement.isJsonNull()) {
+                throw new java.util.concurrent.CompletionException(new IOException("模型接口返回了空内容"));
+            }
+            String content = contentElement.isJsonPrimitive()
+                    ? contentElement.getAsString() : contentElement.toString();
+            return parseStructuredContent(content);
+        } catch (java.util.concurrent.CompletionException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new java.util.concurrent.CompletionException(new IOException(
+                    "模型接口响应格式无效，请检查兼容 API 返回格式", exception));
         }
-        JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
-        JsonElement contentElement = message == null ? null : message.get("content");
-        if (contentElement == null || contentElement.isJsonNull()) {
-            throw new java.util.concurrent.CompletionException(new IOException("模型接口返回了空内容"));
-        }
-        String content = contentElement.isJsonPrimitive() ? contentElement.getAsString() : contentElement.toString();
-        return parseStructuredContent(content);
     }
 
-    private static AssistantReply parseStructuredContent(String content) {
+    /**
+     * 解析模型的结构化回复。模型偶尔会包裹 Markdown 或附加一句说明，
+     * 因此先提取完整 JSON 对象；解析失败必须让调用方显示明确错误，不能把原始 JSON 当答案。
+     */
+    static AssistantReply parseStructuredContent(String content) {
+        try {
+            String candidate = extractJsonObject(content);
+            JsonElement parsed = JsonParser.parseString(candidate);
+            if (!parsed.isJsonObject()) {
+                throw new IllegalArgumentException("顶层不是 JSON 对象");
+            }
+            JsonObject json = parsed.getAsJsonObject();
+            JsonElement answerElement = json.get("answer");
+            if (answerElement == null || !answerElement.isJsonPrimitive()
+                    || !answerElement.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("answer 不是字符串");
+            }
+            String answer = answerElement.getAsString().trim();
+            if (answer.isEmpty()) {
+                answer = "（AI 未提供文字说明）";
+            }
+
+            JsonArray suggestions = json.has("command_suggestions")
+                    && json.get("command_suggestions").isJsonArray()
+                    ? json.getAsJsonArray("command_suggestions") : new JsonArray();
+            java.util.ArrayList<String> commands = new java.util.ArrayList<>();
+            for (JsonElement suggestion : suggestions) {
+                if (!suggestion.isJsonPrimitive()
+                        || !suggestion.getAsJsonPrimitive().isString()) {
+                    throw new IllegalArgumentException("command_suggestions 中包含非字符串");
+                }
+                String command = suggestion.getAsString().trim();
+                if (!command.isEmpty()) {
+                    commands.add(command);
+                }
+                if (commands.size() == 3) {
+                    break;
+                }
+            }
+            return new AssistantReply(answer, commands);
+        } catch (RuntimeException exception) {
+            throw new java.util.concurrent.CompletionException(new IOException(
+                    "AI 返回格式无效：未能解析 answer 或 command_suggestions，请重试", exception));
+        }
+    }
+
+    private static String extractJsonObject(String content) {
+        if (content == null || content.isBlank()) {
+            throw new IllegalArgumentException("模型返回为空");
+        }
         String candidate = content.trim();
-        if (candidate.startsWith("```")) {
-            int firstLine = candidate.indexOf('\n');
-            int closing = candidate.lastIndexOf("```");
-            if (firstLine >= 0 && closing > firstLine) {
-                candidate = candidate.substring(firstLine + 1, closing).trim();
+        if (candidate.startsWith("\ufeff")) {
+            candidate = candidate.substring(1).trim();
+        }
+        int start = candidate.indexOf('{');
+        if (start < 0) {
+            throw new IllegalArgumentException("未找到 JSON 对象");
+        }
+        boolean quoted = false;
+        boolean escaped = false;
+        int depth = 0;
+        for (int index = start; index < candidate.length(); index++) {
+            char current = candidate.charAt(index);
+            if (quoted) {
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (current == '"') {
+                quoted = true;
+            } else if (current == '{') {
+                depth++;
+            } else if (current == '}' && --depth == 0) {
+                return candidate.substring(start, index + 1);
             }
         }
-        try {
-            JsonObject json = JsonParser.parseString(candidate).getAsJsonObject();
-            String answer = json.has("answer") ? json.get("answer").getAsString() : "（AI 未提供文字说明）";
-            JsonArray suggestions = json.has("command_suggestions") && json.get("command_suggestions").isJsonArray()
-                    ? json.getAsJsonArray("command_suggestions") : new JsonArray();
-            java.util.List<String> commands = suggestions.asList().stream()
-                    .filter(JsonElement::isJsonPrimitive)
-                    .map(JsonElement::getAsString)
-                    .limit(3)
-                    .toList();
-            return new AssistantReply(answer, commands);
-        } catch (RuntimeException ignored) {
-            return new AssistantReply(content, java.util.List.of());
-        }
+        throw new IllegalArgumentException("JSON 对象未闭合");
     }
 }
