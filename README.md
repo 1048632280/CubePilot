@@ -1,6 +1,6 @@
 # CubePilot
 
-CubePilot 是一个只运行在 Minecraft Java 原生专用服务端上的 AI 管理辅助模组。Agent 直接读取服务端 API，不以玩家身份登录；AI 生成的 Minecraft 命令只作为可点击的聊天建议填入玩家命令框，必须由管理员检查并手动按回车执行。
+CubePilot 是一个只运行在 Minecraft Java 原生专用服务端上的 AI 管理辅助模组。Agent 直接读取服务端 API，不会以玩家身份登录。命令默认只作为可点击的聊天建议；只有管理员显式配置到自动白名单、且通过安全规则的命令，才可能由服务器使用发起请求玩家的权限自动执行。
 
 ## 支持目标
 
@@ -19,16 +19,24 @@ CubePilot 是一个只运行在 Minecraft Java 原生专用服务端上的 AI �
 
 ## 安装与配置
 
-将匹配版本的 JAR 放入服务端 `mods/`，使用对应加载器启动。Mod 加载时只会创建 `config/cubepilot/cubepilot.properties` 和目录，不读取 API 配置、不创建 API 客户端，也不会发起网络请求。编辑配置后，在游戏内使用 `/cp reload`（OP 2）即可让 CubePilot 重新读取自身配置，无需重启服务端；重载失败时会保留上一份有效配置。设置文件中的 API Key 仅作为环境变量缺失时的回退选项；请限制配置目录的操作系统访问权限。
+将匹配版本的 JAR 放入服务端 `mods/`，使用对应加载器启动。Mod 加载时只会创建 `config/cubepilot/cubepilot.toml` 和目录，不读取 API 配置、不创建 API 客户端，也不会发起网络请求。旧版 `cubepilot.properties` 不再读取。编辑 TOML 后，在游戏内使用 `/cp reload`（OP 2）即可让 CubePilot 重新读取自身配置，无需重启服务端；重载失败时会保留上一份有效配置。设置文件中的 API Key 仅作为环境变量缺失时的回退选项；请限制配置目录的操作系统访问权限。
 
-```properties
-api.endpoint=https://api.openai.com/v1/chat/completions
-api.model=gpt-4o-mini
-api.key=
-api.timeout-seconds=45
-command.allow-roots=give,effect,enchant,tp,teleport,time,weather,difficulty,gamerule,experience,xp
-files.max-bytes=16384
+```toml
+[api]
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o-mini"
+key = ""
+
+[command]
+offer-add-to-auto-allow = true
+
+[command.auto-allow]
+roots = []
+subcommands = []
+exact = []
 ```
+
+Mod 首次启动生成的完整 TOML 带有逐项中文注释。默认自动白名单为空；不要为了方便直接允许宽泛的一级命令。
 
 配置自定义 API 地址时使用 HTTPS；只有回环地址（localhost、127.0.0.1、::1）可使用 HTTP。端点必须兼容 OpenAI Chat Completions API。
 
@@ -40,7 +48,7 @@ files.max-bytes=16384
 - `/cp status`：查看简要版本、加载器、难度、在线人数和白名单状态。
 - `/cp snapshot`：查看运行状态、`server.properties` 安全字段及白名单配置/日志/崩溃文件路径；不会读取清单中文件的内容。
 - `/cp mods`：查看已加载 Mod。
-- `/cp reload`：重新读取 CubePilot 自身的 `config/cubepilot/cubepilot.properties`，不调用 API；不会热加载其他 Mod 的配置。
+- `/cp reload`：重新读取 CubePilot 自身的 `config/cubepilot/cubepilot.toml`，不调用 API；不会热加载其他 Mod 的配置。
 - `/cp files [目录]`：列出只读允许目录。
 - `/cp read <相对路径>`：读取并做常见凭据脱敏。
 - `/cp analyze <路径>`：使用本地规则离线分析日志、崩溃报告或配置，不调用外部 API。
@@ -52,7 +60,7 @@ files.max-bytes=16384
 
 ## 命令建议安全边界
 
-模型返回受约束的 JSON 建议。CubePilot 只展示通过命令根白名单和 Brigadier 语法检查的建议，并使用聊天的 `SUGGEST_COMMAND` 点击动作填入文本；模组不分派、不执行建议命令，也不替玩家提权。请仔细检查目标选择器、数量和参数后再按回车。命令根白名单可进一步缩小，危险命令无论配置如何都被拒绝。
+自动执行白名单支持一级命令、二级命令和完整命令精确匹配；完整命令可通过建议旁的按钮经过两次确认后加入。`offer-add-to-auto-allow = false` 时不会显示或询问加入白名单的按钮，只显示允许的手动建议。永久禁止名单和可调整禁止名单优先于自动白名单；四值安全项分别控制自动执行与 CubePilot 手动建议。默认禁止高危命令自动执行，并禁止使用 `@a`、`@e`、复杂 NBT/组件、批量目标及指向其他玩家的参数。每条模型回复最多自动执行一条命令，且只在发起请求的玩家仍在线时处理。CubePilot 不拦截玩家自己输入的任何 Minecraft 或 Mod 命令；自动执行仍受该玩家权限和服务器命令语法检查约束。
 
 只读文件和日志内容被当作不可信文本，不作为模型指令；发往 API 前会限制上下文大小并脱敏常见凭据格式。在线玩家名称不会发送给模型。审计日志位于 `config/cubepilot/audit.jsonl`，包含请求开始/结束、文件访问及建议/拒绝动作，不记录完整提问、文件内容或 API Key。审计文件由模组创建和追加，不会被文件读取接口开放；首次创建的 CubePilot 配置目录和配置文件会尽可能限制为仅服务端操作系统账户可读。
 

@@ -27,7 +27,7 @@ public final class OpenAiClient {
         String key = config.apiKey();
         if (key.isBlank()) {
             return CompletableFuture.failedFuture(new IOException(
-                    "尚未配置 API Key：请设置 CUBEPILOT_API_KEY，或在 config/cubepilot/cubepilot.properties 中填写 api.key"));
+                    "尚未配置 API Key：请设置 CUBEPILOT_API_KEY，或在 config/cubepilot/cubepilot.toml 中填写 api.key"));
         }
 
         JsonObject payload = new JsonObject();

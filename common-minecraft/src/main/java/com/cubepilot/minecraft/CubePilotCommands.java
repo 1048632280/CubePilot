@@ -19,8 +19,10 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandSourceStack;
@@ -28,11 +30,14 @@ import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 
 public final class CubePilotCommands {
     private static final List<String> ROOTS = List.of("cp", "cpilot", "cpa");
     private static final String PREFIX = "[CubePilot] ";
     private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
+    private static final long ALLOW_CONFIRM_TTL_MILLIS = 120_000L;
+    private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
 
     private CubePilotCommands() {
     }
@@ -47,13 +52,22 @@ public final class CubePilotCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> createRoot(String root,
             String loader, List<ModInfo> mods) {
         return Commands.literal(root)
-                .requires(source -> source.hasPermission(2))
+                .requires(source -> source.getEntity() instanceof ServerPlayer && source.hasPermission(2))
                 .executes(context -> help(context.getSource()))
                 .then(Commands.literal("help").executes(context -> help(context.getSource())))
                 .then(Commands.literal("status").executes(context -> status(context, loader, mods)))
                 .then(Commands.literal("snapshot").executes(context -> showSnapshot(context, loader, mods)))
                 .then(Commands.literal("mods").executes(context -> showMods(context, mods)))
                 .then(Commands.literal("reload").executes(CubePilotCommands::reload))
+                .then(Commands.literal("allow")
+                        .then(Commands.literal("add")
+                                .then(Commands.argument("token", StringArgumentType.word())
+                                        .executes(context -> requestAllowConfirmation(context,
+                                                StringArgumentType.getString(context, "token")))))
+                        .then(Commands.literal("confirm")
+                                .then(Commands.argument("token", StringArgumentType.word())
+                                        .executes(context -> confirmAllow(context,
+                                                StringArgumentType.getString(context, "token"))))))
                 .then(Commands.literal("files")
                         .executes(context -> listFiles(context, ""))
                         .then(Commands.argument("path", StringArgumentType.greedyString())
@@ -95,13 +109,13 @@ public final class CubePilotCommands {
         send(source, "命令别名：/cp、/cpilot、/cpa（需要 OP 2 级权限）");
         send(source, "/cp <问题> 或 /cp ask <问题>：查询百科/服务器状态并生成命令建议");
         send(source, "/cp status | mods：查看简要服务器状态或已加载 Mod");
-        send(source, "/cp reload：重新读取 CubePilot 自身 cubepilot.properties，不调用 API");
+        send(source, "/cp reload：重新读取 CubePilot 自身 cubepilot.toml，不调用 API");
         send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
         send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
         send(source, "/cp config <自然语言问题>：自动识别 Mod，扫描只读配置并回答当前值与手工修改方法");
         send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
-        send(source, "命令建议只会显示为可点击的聊天文本：点击填入命令框后，必须由你手动按回车执行。");
+        send(source, "命令命中自动白名单且通过全部安全检查时会执行；其他允许显示的建议需点击后手动回车。");
         return 1;
     }
 
@@ -128,9 +142,95 @@ public final class CubePilotCommands {
             send(source, "模型：" + agent.config().model());
             return 1;
         } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "config.reload", "cubepilot.properties", exception);
+            auditDenied(source, "config.reload", "cubepilot.toml", exception);
             return fail(source, "重新加载失败，旧配置仍在使用：" + safeMessage(exception));
         }
+    }
+
+    private static int requestAllowConfirmation(CommandContext<CommandSourceStack> context, String token) {
+        CommandSourceStack source = context.getSource();
+        PendingAllow pending = consumePending(token, source, PendingStage.OFFER);
+        if (pending == null) {
+            return fail(source, "白名单请求无效、已使用、已过期，或不属于当前操作者。");
+        }
+        CommandPolicy.Decision decision = currentDecision(source, pending.command());
+        if (!decision.offerAddToAutoAllow()) {
+            return fail(source, "当前配置已不允许把这条命令加入自动白名单，请重新发起 AI 请求。");
+        }
+        pruneExpiredPendingAllows();
+        String confirmationToken = newToken();
+        PENDING_ALLOWS.put(confirmationToken, new PendingAllow(
+                actorId(source), pending.command(), System.currentTimeMillis() + ALLOW_CONFIRM_TTL_MILLIS,
+                PendingStage.CONFIRM));
+        Component confirm = Component.literal("[确认写入精确自动白名单]")
+                .withStyle(ChatFormatting.RED)
+                .withStyle(style -> style.withClickEvent(new ClickEvent(
+                        ClickEvent.Action.RUN_COMMAND, "/cp allow confirm " + confirmationToken)));
+        send(source, "即将把以下完整命令写入 CubePilot 自身配置；本次不会执行该命令：");
+        send(source, pending.command());
+        source.sendSuccess(() -> confirm, false);
+        return 1;
+    }
+
+    private static int confirmAllow(CommandContext<CommandSourceStack> context, String token) {
+        CommandSourceStack source = context.getSource();
+        PendingAllow pending = consumePending(token, source, PendingStage.CONFIRM);
+        if (pending == null) {
+            return fail(source, "确认请求无效、已使用、已过期，或不属于当前操作者。");
+        }
+        try {
+            CommandPolicy.Decision decision = currentDecision(source, pending.command());
+            if (!decision.offerAddToAutoAllow()) {
+                return fail(source, "当前配置已不允许把这条命令加入自动白名单，请重新发起 AI 请求。");
+            }
+            boolean added = CubePilotAgent.addExactAutoAllowedCommand(pending.command());
+            CubePilotAgent current = CubePilotAgent.get();
+            current.audit().record(source.getTextName(), "command.auto-allow.add",
+                    "command=" + pending.command() + " result=" + (added ? "added" : "already-present"));
+            send(source, added
+                    ? "已写入精确自动白名单并重新加载配置；该命令从后续请求开始可自动执行。"
+                    : "该完整命令已经在自动白名单中，配置未重复写入。");
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "command.auto-allow.add", pending.command(), exception);
+            return fail(source, "写入或重载失败，原配置和旧运行配置已保留：" + safeMessage(exception));
+        }
+    }
+
+    private static PendingAllow consumePending(String token, CommandSourceStack source, PendingStage expectedStage) {
+        PendingAllow pending = PENDING_ALLOWS.remove(token);
+        if (pending == null || pending.stage() != expectedStage
+                || pending.expiresAtMillis() < System.currentTimeMillis()
+                || !pending.actor().equals(actorId(source))) {
+            return null;
+        }
+        return pending;
+    }
+
+    private static String newToken() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static void pruneExpiredPendingAllows() {
+        long now = System.currentTimeMillis();
+        PENDING_ALLOWS.entrySet().removeIf(entry -> entry.getValue().expiresAtMillis() < now);
+    }
+
+    private static CommandPolicy.Decision currentDecision(CommandSourceStack source, String command) {
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            List<String> players = source.getServer().getPlayerList().getPlayers().stream()
+                    .map(player -> player.getGameProfile().getName())
+                    .toList();
+            return CommandPolicy.evaluate(command, agent.config(), source.getTextName(), players);
+        } catch (IOException | IllegalArgumentException exception) {
+            return new CommandPolicy.Decision(null, false, false, false,
+                    "当前配置不可用", List.of());
+        }
+    }
+
+    private static String actorId(CommandSourceStack source) {
+        return source.getEntity() == null ? "" : source.getEntity().getUUID().toString();
     }
 
     private static int showSnapshot(CommandContext<CommandSourceStack> context,
@@ -455,14 +555,25 @@ public final class CubePilotCommands {
     }
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent, AssistantReply reply) {
+        if (!(source.getEntity() instanceof ServerPlayer player)
+                || source.getServer().getPlayerList().getPlayer(player.getUUID()) != player) {
+            agent.audit().record(source.getTextName(), "request.response.discarded", "requesting player is offline");
+            return;
+        }
         sendBoundedLines(source, reply.answer(), 20, 1000);
         int accepted = 0;
+        List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
+                .map(player -> player.getGameProfile().getName())
+                .toList();
+        boolean autoExecuted = false;
         for (String suggestion : reply.commandSuggestions()) {
-            String command = CommandPolicy.validateSuggestion(suggestion, agent.allowedCommandRoots());
-            if (command == null) {
-                agent.audit().record(source.getTextName(), "command.rejected", "policy");
+            CommandPolicy.Decision decision = CommandPolicy.evaluate(
+                    suggestion, agent.config(), source.getTextName(), onlinePlayers);
+            if (!decision.valid()) {
+                agent.audit().record(source.getTextName(), "command.rejected", decision.reason());
                 continue;
             }
+            String command = decision.command();
             String raw = command.substring(1);
             ParseResults<CommandSourceStack> parsed = source.getServer().getCommands()
                     .getDispatcher().parse(raw, source);
@@ -470,18 +581,57 @@ public final class CubePilotCommands {
                 agent.audit().record(source.getTextName(), "command.rejected", "parse");
                 continue;
             }
-            Component clickable = Component.literal("  [点击填入，不会自动执行] " + command)
-                    .withStyle(ChatFormatting.GREEN)
-                    .withStyle(style -> style.withClickEvent(
-                            new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, command)));
-            source.sendSuccess(() -> clickable, false);
-            agent.audit().record(source.getTextName(), "command.suggested", command);
-            accepted++;
+
+            if (decision.automatic() && !autoExecuted) {
+                try {
+                    int result = source.getServer().getCommands().performPrefixedCommand(source, raw);
+                    agent.audit().record(source.getTextName(), result > 0
+                                    ? "command.auto-executed" : "command.auto-result-zero",
+                            "command=" + command + " result=" + result + " reason=" + decision.reason());
+                    send(source, result > 0
+                            ? "已按自动白名单执行：" + command
+                            : "命令已按自动白名单提交，但服务器未返回成功结果（0）；请检查游戏状态和审计日志。");
+                    accepted++;
+                    autoExecuted = true;
+                } catch (RuntimeException exception) {
+                    agent.audit().record(source.getTextName(), "command.auto-error",
+                            "command=" + command + " error=" + safeMessage(exception));
+                    send(source, "自动执行失败：" + safeMessage(exception));
+                }
+                continue;
+            }
+
+            if (decision.manualAllowed()) {
+                Component clickable = Component.literal("  [点击填入，手动回车] " + command)
+                        .withStyle(ChatFormatting.GREEN)
+                        .withStyle(style -> style.withClickEvent(
+                                new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, command)));
+                source.sendSuccess(() -> clickable, false);
+                agent.audit().record(source.getTextName(), "command.suggested",
+                        "command=" + command + " reason=" + decision.reason());
+                accepted++;
+            }
+            if (decision.offerAddToAutoAllow()) {
+                pruneExpiredPendingAllows();
+                String token = newToken();
+                PENDING_ALLOWS.put(token, new PendingAllow(actorId(source), command,
+                        System.currentTimeMillis() + ALLOW_CONFIRM_TTL_MILLIS, PendingStage.OFFER));
+                Component add = Component.literal("  [加入精确自动白名单]")
+                        .withStyle(ChatFormatting.YELLOW)
+                        .withStyle(style -> style.withClickEvent(new ClickEvent(
+                                ClickEvent.Action.RUN_COMMAND, "/cp allow add " + token)));
+                source.sendSuccess(() -> add, false);
+                accepted++;
+            }
+            if (!decision.manualAllowed() && !decision.offerAddToAutoAllow()) {
+                agent.audit().record(source.getTextName(), "command.rejected",
+                        "command=" + command + " reason=manual-safety");
+            }
         }
         if (!reply.commandSuggestions().isEmpty() && accepted == 0) {
-            send(source, "模型给出的命令未通过白名单或语法检查，因此没有显示。");
+            send(source, "模型给出的命令未通过语法、权限或当前安全规则，因此没有执行或显示。");
         } else if (accepted > 0) {
-            send(source, "命令尚未执行：点击建议填入聊天框，并由你检查后手动按回车；执行时使用你的玩家权限。");
+            send(source, "标记为手动建议的命令尚未执行；点击填入后请自行检查并按回车。");
         }
     }
 
@@ -549,5 +699,13 @@ public final class CubePilotCommands {
         }
         String safe = AuditLog.safeDiagnosticText(message).replaceAll("[\\r\\n]", " ");
         return safe.length() <= 500 ? safe : safe.substring(0, 500);
+    }
+
+    private record PendingAllow(String actor, String command, long expiresAtMillis, PendingStage stage) {
+    }
+
+    private enum PendingStage {
+        OFFER,
+        CONFIRM
     }
 }

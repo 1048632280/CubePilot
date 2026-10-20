@@ -49,7 +49,7 @@ class ConfigInspectorTest {
         Files.writeString(config.resolve("examplemod-client.toml"), "view-distance=8\n");
         Files.writeString(config.resolve("othermod.toml"), "enabled=false\n");
         Files.createDirectories(serverRoot.resolve("config/cubepilot"));
-        Files.writeString(serverRoot.resolve("config/cubepilot/cubepilot.properties"), "api.key=hidden\n");
+        Files.writeString(serverRoot.resolve("config/cubepilot/cubepilot.toml"), "[api]\nkey = \"hidden\"\n");
         ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
 
         assertEquals(List.of("config/examplemod-client.toml", "config/examplemod.toml", "config/othermod.toml"),

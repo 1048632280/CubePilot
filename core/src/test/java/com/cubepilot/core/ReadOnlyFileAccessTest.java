@@ -34,7 +34,7 @@ class ReadOnlyFileAccessTest {
 
         assertThrows(IOException.class, () -> access.read("../secret.json"));
         assertThrows(IOException.class, () -> access.read("secret.json"));
-        assertThrows(IOException.class, () -> access.read("config/cubepilot/cubepilot.properties"));
+        assertThrows(IOException.class, () -> access.read("config/cubepilot/cubepilot.toml"));
     }
 
     @Test
@@ -82,7 +82,7 @@ class ReadOnlyFileAccessTest {
         Files.writeString(config.resolve("server.toml"), "do-not-include-content");
         Files.writeString(config.resolve("secret.json"), "secret");
         Path cubePilotConfig = Files.createDirectories(serverRoot.resolve("config/cubepilot"));
-        Files.writeString(cubePilotConfig.resolve("cubepilot.properties"), "api.key=secret");
+        Files.writeString(cubePilotConfig.resolve("cubepilot.toml"), "[api]\nkey = \"secret\"\n");
         Path archivedConfig = Files.createDirectories(serverRoot.resolve("config/cubepilot-archive"));
         Files.writeString(archivedConfig.resolve("settings.json"), "{}");
         Path logs = Files.createDirectories(serverRoot.resolve("logs"));
@@ -99,6 +99,6 @@ class ReadOnlyFileAccessTest {
         assertTrue(inventory.stream().noneMatch(path -> path.contains("secret") || path.contains("usercache")));
         assertTrue(inventory.stream().noneMatch(path -> path.contains("do-not-include-content")));
         assertEquals("{}", access.read("config/cubepilot-archive/settings.json"));
-        assertThrows(IOException.class, () -> access.read("config/cubepilot/cubepilot.properties"));
+        assertThrows(IOException.class, () -> access.read("config/cubepilot/cubepilot.toml"));
     }
 }
