@@ -26,7 +26,8 @@ public final class ReadOnlyFileAccess {
     private static final Set<String> DENIED_NAMES = Set.of(
             ".env", "credentials", "secrets", "server-icon.png", "usercache.json", "whitelist.json",
             "ops.json", "banned-ips.json", "banned-players.json");
-    private static final Set<String> ALLOWED_ROOTS = Set.of("config", "logs", "crash-reports");
+    private static final Set<String> ALLOWED_ROOTS = Set.of(
+            "config", "defaultconfigs", "logs", "crash-reports");
     private static final Set<String> SNAPSHOT_PROPERTY_KEYS = Set.of(
             "allow-flight", "allow-nether", "difficulty", "enable-command-block", "enforce-whitelist",
             "force-gamemode", "gamemode", "generate-structures", "hardcore", "max-players", "max-tick-time",
@@ -62,7 +63,8 @@ public final class ReadOnlyFileAccess {
                     continue;
                 }
                 if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
-                    if (!rootListing || ALLOWED_ROOTS.contains(name.toLowerCase(Locale.ROOT)) || name.equalsIgnoreCase("mods")) {
+                    if (!rootListing || ALLOWED_ROOTS.contains(name.toLowerCase(Locale.ROOT))
+                            || name.equalsIgnoreCase("world") || name.equalsIgnoreCase("mods")) {
                         entries.add(name + "/");
                     }
                 } else if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS)
@@ -125,9 +127,9 @@ public final class ReadOnlyFileAccess {
     public List<String> configurationInventorySnapshot() {
         List<String> files = new ArrayList<>();
         int[] visitedEntries = {0};
-        for (String root : List.of("config", "logs", "crash-reports")) {
+        for (String root : List.of("config", "defaultconfigs", "world/serverconfig", "logs", "crash-reports")) {
             Path directory = serverRoot.resolve(root);
-            if (Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(directory)) {
+            if (isSafeDirectory(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
                 collectInventory(directory, root, 0, visitedEntries, files);
             }
             if (files.size() >= MAX_INVENTORY_FILES || visitedEntries[0] >= MAX_INVENTORY_ENTRIES_VISITED) {
@@ -139,23 +141,63 @@ public final class ReadOnlyFileAccess {
     }
 
     public List<String> findModConfigurationFiles(String modId) {
+        return findModConfigurationFiles(modId, "");
+    }
+
+    public List<String> findModConfigurationFiles(String modId, String displayName) {
         if (modId == null || !modId.matches("[A-Za-z0-9_.-]{1,64}")) {
             throw new IllegalArgumentException("Mod ID 只能包含字母、数字、点、下划线和连字符");
         }
         String lowerId = modId.toLowerCase(Locale.ROOT);
         String compactId = lowerId.replace(".", "").replace("_", "").replace("-", "");
+        String lowerName = displayName == null ? "" : displayName.toLowerCase(Locale.ROOT).trim();
+        String compactName = lowerName.replaceAll("[^\\p{L}\\p{N}]", "");
         List<String> matches = new ArrayList<>();
         for (String path : configurationInventorySnapshot()) {
-            if (!path.toLowerCase(Locale.ROOT).startsWith("config/")) {
+            if (!isConfigurationPath(path)) {
                 continue;
             }
             String lowerPath = path.toLowerCase(Locale.ROOT);
             String compactPath = lowerPath.replace(".", "").replace("_", "").replace("-", "");
-            if (lowerPath.contains(lowerId) || compactPath.contains(compactId)) {
+            if (lowerPath.contains(lowerId) || compactPath.contains(compactId)
+                    || (!compactName.isBlank() && compactPath.contains(compactName))) {
                 matches.add(path);
             }
         }
         return List.copyOf(matches);
+    }
+
+    /** 根据自然语言在只读配置清单中挑选可能相关的配置文件。 */
+    public List<String> searchConfigurationFiles(String query, int limit) throws IOException {
+        String normalizedQuery = normalizeSearchText(query);
+        if (normalizedQuery.isBlank()) {
+            return List.of();
+        }
+        List<ScoredPath> scored = new ArrayList<>();
+        for (String path : configurationInventorySnapshot()) {
+            if (!isConfigurationPath(path)) {
+                continue;
+            }
+            String contents;
+            try {
+                contents = read(path);
+            } catch (IOException ignored) {
+                continue;
+            }
+            String normalizedPath = normalizeSearchText(path);
+            int score = overlapScore(normalizedQuery, normalizedPath) * 4;
+            ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
+            for (ConfigInspector.Entry entry : document.entries()) {
+                score += overlapScore(normalizedQuery, normalizeSearchText(entry.path() + " " + entry.value()));
+            }
+            if (score > 0) {
+                scored.add(new ScoredPath(path, score));
+            }
+        }
+        scored.sort(java.util.Comparator.comparingInt(ScoredPath::score).reversed()
+                .thenComparing(ScoredPath::path));
+        return scored.stream().limit(Math.max(1, Math.min(limit, 20)))
+                .map(ScoredPath::path).toList();
     }
 
     private static void collectInventory(Path directory, String relativePath, int depth,
@@ -223,8 +265,8 @@ public final class ReadOnlyFileAccess {
             String first = normalized.split("/")[0].toLowerCase(Locale.ROOT);
             boolean serverProperties = normalized.equalsIgnoreCase("server.properties");
             boolean modsDirectory = first.equals("mods") && directory;
-            if (!serverProperties && !ALLOWED_ROOTS.contains(first) && !modsDirectory) {
-                throw new IOException("路径不在允许读取的目录中（config、logs、crash-reports、server.properties）");
+            if (!serverProperties && !isAllowedRoot(normalized, directory) && !modsDirectory) {
+                throw new IOException("路径不在允许读取的目录中（config、defaultconfigs、world/serverconfig、logs、crash-reports、server.properties）");
             }
             if (first.equals("config") && isCubePilotConfigPath(normalized)) {
                 throw new IOException("CubePilot 自身配置目录包含凭据，禁止通过聊天读取");
@@ -267,6 +309,77 @@ public final class ReadOnlyFileAccess {
         String normalized = relativePath.toLowerCase(Locale.ROOT);
         return normalized.equals(CUBEPILOT_CONFIG_PATH)
                 || normalized.startsWith(CUBEPILOT_CONFIG_PATH + "/");
+    }
+
+    private static boolean isConfigurationPath(String path) {
+        String normalized = path.toLowerCase(Locale.ROOT).replace('\\', '/');
+        return normalized.startsWith("config/") || normalized.startsWith("defaultconfigs/")
+                || normalized.startsWith("world/serverconfig/");
+    }
+
+    private boolean isSafeDirectory(Path directory) {
+        if (!directory.startsWith(serverRoot)) {
+            return false;
+        }
+        Path current = serverRoot;
+        for (Path component : serverRoot.relativize(directory)) {
+            current = current.resolve(component);
+            if (Files.isSymbolicLink(current)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAllowedRoot(String normalized, boolean directory) {
+        String lower = normalized.toLowerCase(Locale.ROOT).replace('\\', '/');
+        if (ALLOWED_ROOTS.stream().anyMatch(root -> lower.equals(root) || lower.startsWith(root + "/"))) {
+            return true;
+        }
+        return lower.equals("world") || lower.equals("world/serverconfig")
+                || lower.startsWith("world/serverconfig/");
+    }
+
+    private static String normalizeSearchText(String value) {
+        if (value == null) {
+            return "";
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        String normalized = lower.replaceAll("[^\\p{L}\\p{N}]", "");
+        StringBuilder aliases = new StringBuilder(normalized);
+        if (lower.contains("死亡") || lower.contains("死后")) {
+            aliases.append("death");
+        }
+        if (lower.contains("掉血") || lower.contains("伤害")) {
+            aliases.append("damage");
+        }
+        if (lower.contains("关闭") || lower.contains("禁用") || lower.contains("取消")) {
+            aliases.append("disablefalseoffzero");
+        }
+        if (lower.contains("开启") || lower.contains("启用")) {
+            aliases.append("enabletrueon");
+        }
+        if (lower.contains("掉落") || lower.contains("掉东西")) {
+            aliases.append("dropitemloot");
+        }
+        return aliases.toString();
+    }
+
+    private static int overlapScore(String query, String candidate) {
+        if (candidate.isBlank()) {
+            return 0;
+        }
+        int score = query.contains(candidate) || candidate.contains(query) ? 3 : 0;
+        for (int start = 0; start + 2 <= query.length(); start++) {
+            String part = query.substring(start, start + 2);
+            if (candidate.contains(part)) {
+                score++;
+            }
+        }
+        return score;
+    }
+
+    private record ScoredPath(String path, int score) {
     }
 
     private static boolean isDeniedName(String name) {

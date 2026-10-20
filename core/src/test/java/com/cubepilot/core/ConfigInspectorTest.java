@@ -39,6 +39,7 @@ class ConfigInspectorTest {
         assertEquals("[已隐藏]", find(yaml.entries(), "server.password").value());
         assertEquals("10", find(toml.entries(), "server.view-distance").value());
         assertEquals("survival", find(properties.entries(), "mode").value());
+        assertEquals(2, find(yaml.entries(), "server.view-distance").line());
     }
 
     @Test
@@ -56,6 +57,23 @@ class ConfigInspectorTest {
         assertTrue(access.findModConfigurationFiles("othermod").contains("config/othermod.toml"));
         assertFalse(access.findModConfigurationFiles("cubepilot").stream()
                 .anyMatch(path -> path.contains("cubepilot")));
+    }
+
+    @Test
+    void searchesDefaultAndWorldServerConfigByQuestion() throws IOException {
+        Path defaults = Files.createDirectories(serverRoot.resolve("defaultconfigs"));
+        Files.writeString(defaults.resolve("ringmod-server.toml"),
+                "[mechanics]\ndeath_damage = 1\n");
+        Path worldConfig = Files.createDirectories(serverRoot.resolve("world/serverconfig"));
+        Files.writeString(worldConfig.resolve("ringmod.json"),
+                "{\"deathDamage\":true}\n");
+
+        ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
+
+        assertTrue(access.findModConfigurationFiles("ringmod", "七咒之戒").contains(
+                "defaultconfigs/ringmod-server.toml"));
+        assertEquals(List.of("defaultconfigs/ringmod-server.toml"),
+                access.searchConfigurationFiles("关闭死亡掉血", 1));
     }
 
     private static ConfigInspector.Entry find(List<ConfigInspector.Entry> entries, String path) {

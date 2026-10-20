@@ -32,7 +32,16 @@ public final class ConfigInspector {
         List<String> warnings = new ArrayList<>();
         try {
             switch (format) {
-                case "JSON" -> flattenJson("", JsonParser.parseString(text), entries, warnings, 0);
+                case "JSON" -> {
+                    flattenJson("", JsonParser.parseString(text), entries, warnings, 0);
+                    for (int index = 0; index < entries.size(); index++) {
+                        Entry entry = entries.get(index);
+                        if (entry.line() == 0) {
+                            entries.set(index, new Entry(entry.path(), entry.value(),
+                                    findJsonLine(text, entry.path())));
+                        }
+                    }
+                }
                 case "YAML" -> parseLines(text, entries, warnings, true, false);
                 case "TOML" -> parseLines(text, entries, warnings, false, true);
                 default -> parseLines(text, entries, warnings, false, false);
@@ -95,7 +104,7 @@ public final class ConfigInspector {
                 }
             }
         } else {
-            addEntry(entries, prefix, element.toString());
+                addEntry(entries, prefix, element.toString(), 0);
         }
     }
 
@@ -140,7 +149,7 @@ public final class ConfigInspector {
                 sections.push(new Section(indent, key));
             }
             String path = joinSections(sections, key, yaml || toml);
-            addEntry(entries, path, value);
+            addEntry(entries, path, value, index + 1);
         }
         if (entries.size() >= MAX_ENTRIES) {
             warnings.add("键数量达到上限，后续内容未展示。" );
@@ -182,7 +191,7 @@ public final class ConfigInspector {
         return String.join(".", names);
     }
 
-    private static void addEntry(List<Entry> entries, String path, String rawValue) {
+    private static void addEntry(List<Entry> entries, String path, String rawValue, int line) {
         if (path == null || path.isBlank() || entries.size() >= MAX_ENTRIES) {
             return;
         }
@@ -195,7 +204,31 @@ public final class ConfigInspector {
                 value = value.substring(0, MAX_VALUE_LENGTH) + "…";
             }
         }
-        entries.add(new Entry(path, value));
+        entries.add(new Entry(path, value, line));
+    }
+
+    private static int findJsonLine(String text, String path) {
+        if (text == null || path == null || path.isBlank()) {
+            return 0;
+        }
+        String key = path.replaceAll("\\[\\d+\\]$", "");
+        int separator = Math.max(key.lastIndexOf('.'), key.lastIndexOf(']'));
+        String leaf = separator >= 0 ? key.substring(separator + 1) : key;
+        if (leaf.isBlank()) {
+            return 0;
+        }
+        String quoted = "\"" + java.util.regex.Pattern.quote(leaf) + "\"";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(quoted).matcher(text);
+        if (!matcher.find()) {
+            return 0;
+        }
+        int line = 1;
+        for (int index = 0; index < matcher.start(); index++) {
+            if (text.charAt(index) == '\n') {
+                line++;
+            }
+        }
+        return line;
     }
 
     public record ConfigDocument(String path, String format, List<Entry> entries, List<String> warnings) {
@@ -213,6 +246,9 @@ public final class ConfigInspector {
             } else {
                 for (Entry entry : entries) {
                     summary.append("\n- ").append(entry.path()).append(" = ").append(entry.value());
+                    if (entry.line() > 0) {
+                        summary.append("（第").append(entry.line()).append("行）");
+                    }
                 }
             }
             for (String warning : warnings) {
@@ -222,7 +258,10 @@ public final class ConfigInspector {
         }
     }
 
-    public record Entry(String path, String value) {
+    public record Entry(String path, String value, int line) {
+        public Entry(String path, String value) {
+            this(path, value, 0);
+        }
     }
 
     private record Section(int indent, String name) {

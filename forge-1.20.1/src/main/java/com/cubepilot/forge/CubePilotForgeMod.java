@@ -1,6 +1,7 @@
 package com.cubepilot.forge;
 
 import com.cubepilot.minecraft.CubePilotCommands;
+import com.cubepilot.core.ModInfo;
 import java.util.List;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -18,9 +19,9 @@ public final class CubePilotForgeMod {
 
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
-        List<String> mods = ModList.get().getMods().stream()
-                .map(mod -> mod.getModId() + " " + mod.getVersion())
-                .sorted()
+        List<ModInfo> mods = ModList.get().getMods().stream()
+                .map(mod -> new ModInfo(mod.getModId(), mod.getDisplayName(), mod.getVersion()))
+                .sorted(java.util.Comparator.comparing(ModInfo::id))
                 .toList();
         CubePilotCommands.register(event.getDispatcher(), "Forge", mods);
     }

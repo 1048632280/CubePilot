@@ -7,6 +7,7 @@ import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.DiagnosticAnalyzer;
 import com.cubepilot.core.DiagnosticReport;
+import com.cubepilot.core.ModInfo;
 import com.cubepilot.core.ReadOnlyFileAccess;
 import com.cubepilot.core.ServerSnapshot;
 import com.mojang.brigadier.CommandDispatcher;
@@ -16,7 +17,10 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 import net.minecraft.ChatFormatting;
@@ -35,14 +39,14 @@ public final class CubePilotCommands {
     }
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher,
-            String loader, List<String> mods) {
+            String loader, List<ModInfo> mods) {
         for (String root : ROOTS) {
             dispatcher.register(createRoot(root, loader, mods));
         }
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> createRoot(String root,
-            String loader, List<String> mods) {
+            String loader, List<ModInfo> mods) {
         return Commands.literal(root)
                 .requires(source -> source.hasPermission(2))
                 .executes(context -> help(context.getSource()))
@@ -64,13 +68,9 @@ public final class CubePilotCommands {
                                 .executes(context -> analyze(context,
                                         StringArgumentType.getString(context, "path")))))
                 .then(Commands.literal("config")
-                        .then(Commands.argument("mod", StringArgumentType.word())
-                                .executes(context -> showModConfig(context,
-                                        StringArgumentType.getString(context, "mod")))
-                                .then(Commands.argument("question", StringArgumentType.greedyString())
-                                        .executes(context -> askModConfig(context, loader, mods,
-                                                StringArgumentType.getString(context, "mod"),
-                                                StringArgumentType.getString(context, "question"))))))
+                        .then(Commands.argument("request", StringArgumentType.greedyString())
+                                .executes(context -> configRequest(context, loader, mods,
+                                        StringArgumentType.getString(context, "request")))))
                 .then(Commands.literal("inspect")
                         .then(Commands.argument("path", StringArgumentType.word())
                                 .executes(context -> inspect(context, loader, mods,
@@ -98,14 +98,14 @@ public final class CubePilotCommands {
         send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
         send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
-        send(source, "/cp config <Mod ID> [问题]：定位并解析该 Mod 配置，回答手工修改方法，不会写文件");
+        send(source, "/cp config <自然语言问题>：自动识别 Mod，扫描只读配置并回答当前值与手工修改方法");
         send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
         send(source, "命令建议只会显示为可点击的聊天文本：点击填入命令框后，必须由你手动按回车执行。");
         return 1;
     }
 
     private static int status(CommandContext<CommandSourceStack> context,
-            String loader, List<String> mods) {
+            String loader, List<ModInfo> mods) {
         try {
             ServerSnapshot snapshot = runtimeSnapshot(context.getSource().getServer(), loader, mods);
             for (String line : snapshot.toStatusText().split("\\n")) {
@@ -118,7 +118,7 @@ public final class CubePilotCommands {
     }
 
     private static int showSnapshot(CommandContext<CommandSourceStack> context,
-            String loader, List<String> mods) {
+            String loader, List<ModInfo> mods) {
         CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
@@ -133,9 +133,9 @@ public final class CubePilotCommands {
         }
     }
 
-    private static int showMods(CommandContext<CommandSourceStack> context, List<String> mods) {
+    private static int showMods(CommandContext<CommandSourceStack> context, List<ModInfo> mods) {
         send(context.getSource(), "已加载 Mod（" + mods.size() + " 个）：");
-        List<String> visible = mods.stream().limit(200).toList();
+        List<String> visible = mods.stream().limit(200).map(ModInfo::displayText).toList();
         for (int start = 0; start < visible.size(); start += 12) {
             send(context.getSource(), String.join(", ", visible.subList(start, Math.min(start + 12, visible.size()))));
         }
@@ -182,7 +182,7 @@ public final class CubePilotCommands {
     }
 
     private static int inspect(CommandContext<CommandSourceStack> context, String loader,
-            List<String> mods, String path, String question) {
+            List<ModInfo> mods, String path, String question) {
         CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
@@ -219,6 +219,142 @@ public final class CubePilotCommands {
         }
     }
 
+    private static int configRequest(CommandContext<CommandSourceStack> context, String loader,
+            List<ModInfo> mods, String request) {
+        CommandSourceStack source = context.getSource();
+        String normalized = request == null ? "" : request.trim();
+        if (normalized.isBlank() || normalized.length() > 4000) {
+            return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
+        }
+        String firstToken = normalized.split("\\s+", 2)[0];
+        ModInfo explicit = mods.stream()
+                .filter(mod -> mod.id().equalsIgnoreCase(firstToken))
+                .findFirst().orElse(null);
+        if (explicit != null) {
+            String remainder = normalized.length() == firstToken.length()
+                    ? "" : normalized.substring(firstToken.length()).trim();
+            if (remainder.isBlank()) {
+                return showModConfig(context, explicit.id());
+            }
+            return askModConfig(context, loader, mods, explicit.id(), remainder);
+        }
+        return askDiscoveredModConfig(context, loader, mods, normalized);
+    }
+
+    private static int askDiscoveredModConfig(CommandContext<CommandSourceStack> context, String loader,
+            List<ModInfo> mods, String question) {
+        CommandSourceStack source = context.getSource();
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            String attachedContext = discoverConfigContext(agent.files(), mods, question);
+            agent.audit().record(source.getTextName(), "config.auto-discover",
+                    "question_length=" + question.length()
+                            + " context_length=" + attachedContext.length());
+            return ask(context, loader, mods,
+                    "请自动识别我描述的 Mod，并在只读配置中回答：" + question, attachedContext);
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "config.auto-discover", question, exception);
+            return fail(source, "自动检索配置失败：" + safeMessage(exception));
+        }
+    }
+
+    private static String discoverConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
+            String question) throws IOException {
+        List<ConfigCandidate> candidates = new ArrayList<>();
+        for (ModInfo mod : mods) {
+            if (!mod.isValidId()) {
+                continue;
+            }
+            List<String> paths = files.findModConfigurationFiles(mod.id(), mod.name());
+            for (String path : paths) {
+                try {
+                    String contents = files.read(path);
+                    ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
+                    int score = (mod.matches(question) ? 1000 : 0)
+                            + relevance(question, path, document);
+                    candidates.add(new ConfigCandidate(mod, path, document, contents, score));
+                } catch (IOException ignored) {
+                    // 单个文件不可读时继续尝试其他候选，不扩大白名单范围。
+                }
+            }
+        }
+
+        candidates.sort(Comparator.comparingInt(ConfigCandidate::score).reversed()
+                .thenComparing(ConfigCandidate::path));
+        if (candidates.isEmpty()) {
+            List<String> fallbackPaths = files.searchConfigurationFiles(question, 8);
+            if (fallbackPaths.isEmpty()) {
+                fallbackPaths = files.configurationInventorySnapshot().stream()
+                        .filter(path -> path.startsWith("config/") || path.startsWith("defaultconfigs/")
+                                || path.startsWith("world/serverconfig/"))
+                        .limit(12).toList();
+            }
+            for (String path : fallbackPaths) {
+                String contents = files.read(path);
+                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
+                candidates.add(new ConfigCandidate(null, path, document, contents,
+                        relevance(question, path, document)));
+            }
+        }
+
+        StringBuilder context = new StringBuilder("自然语言配置自动检索上下文（只读）：\n")
+                .append("用户问题：").append(question)
+                .append("\n已加载 Mod 候选（ID / 显示名 / 版本）：\n");
+        mods.stream().limit(160).forEach(mod -> context.append("- ").append(mod.displayText()).append('\n'));
+        if (candidates.isEmpty()) {
+            context.append("未从允许目录找到明显匹配的配置文件。请明确说明未找到证据，不能编造路径或键名。\n");
+            return context.toString();
+        }
+        context.append("\n按 Mod 名称、文件名、配置键和值排序的候选文件（最多 6 个）：\n");
+        for (ConfigCandidate candidate : candidates.stream().limit(6).toList()) {
+            if (candidate.mod() != null) {
+                context.append("候选 Mod：").append(candidate.mod().displayText()).append('\n');
+            }
+            context.append(candidate.document().toSummary()).append('\n');
+            context.append("脱敏原文（用于核对行和值，只读）：\n");
+            int remaining = 18000 - context.length();
+            if (remaining <= 0) {
+                break;
+            }
+            context.append(candidate.contents(), 0, Math.min(candidate.contents().length(),
+                    Math.min(6000, remaining))).append('\n');
+        }
+        context.append("请只根据这些证据回答：准确指出 Mod、文件路径、键路径和当前值；"
+                + "给出手工修改示例和重启/备份提醒；没有证据时明确说未找到。\n");
+        return context.toString();
+    }
+
+    private static int relevance(String question, String path, ConfigInspector.ConfigDocument document) {
+        String normalizedQuestion = normalizeSearch(question);
+        int score = overlap(normalizedQuestion, normalizeSearch(path)) * 4;
+        for (ConfigInspector.Entry entry : document.entries()) {
+            score += overlap(normalizedQuestion, normalizeSearch(entry.path() + " " + entry.value()));
+        }
+        return score;
+    }
+
+    private static int overlap(String query, String candidate) {
+        if (query.isBlank() || candidate.isBlank()) {
+            return 0;
+        }
+        int score = query.contains(candidate) || candidate.contains(query) ? 8 : 0;
+        for (int index = 0; index + 2 <= query.length(); index++) {
+            if (candidate.contains(query.substring(index, index + 2))) {
+                score++;
+            }
+        }
+        return score;
+    }
+
+    private static String normalizeSearch(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT)
+                .replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
+    private record ConfigCandidate(ModInfo mod, String path, ConfigInspector.ConfigDocument document,
+            String contents, int score) {
+    }
+
     private static int showModConfig(CommandContext<CommandSourceStack> context, String modId) {
         CommandSourceStack source = context.getSource();
         try {
@@ -226,7 +362,7 @@ public final class CubePilotCommands {
             List<String> paths = agent.files().findModConfigurationFiles(modId);
             agent.audit().record(source.getTextName(), "config.locate", "mod=" + modId + " files=" + paths.size());
             if (paths.isEmpty()) {
-                return fail(source, "没有在 config/ 白名单目录中找到与 Mod ID 匹配的配置文件。");
+                return fail(source, "没有在 config/、defaultconfigs/ 或 world/serverconfig/ 白名单目录中找到匹配的配置文件。");
             }
             send(source, "找到 " + paths.size() + " 个候选配置文件（只读）：");
             for (String path : paths) {
@@ -242,7 +378,7 @@ public final class CubePilotCommands {
     }
 
     private static int askModConfig(CommandContext<CommandSourceStack> context, String loader,
-            List<String> mods, String modId, String question) {
+            List<ModInfo> mods, String modId, String question) {
         CommandSourceStack source = context.getSource();
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
@@ -251,7 +387,7 @@ public final class CubePilotCommands {
             CubePilotAgent agent = CubePilotAgent.get();
             List<String> paths = agent.files().findModConfigurationFiles(modId);
             if (paths.isEmpty()) {
-                return fail(source, "没有在 config/ 白名单目录中找到与 Mod ID 匹配的配置文件。");
+                return fail(source, "没有在 config/、defaultconfigs/ 或 world/serverconfig/ 白名单目录中找到匹配的配置文件。");
             }
             StringBuilder contextText = new StringBuilder("目标 Mod ID：").append(modId)
                     .append("\n以下是自动定位到的只读配置候选；请根据键路径、当前值和原文回答手工修改方法。"
@@ -278,7 +414,7 @@ public final class CubePilotCommands {
     }
 
     private static int ask(CommandContext<CommandSourceStack> context, String loader,
-            List<String> mods, String question, String attachedContext) {
+            List<ModInfo> mods, String question, String attachedContext) {
         CommandSourceStack source = context.getSource();
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
@@ -310,7 +446,7 @@ public final class CubePilotCommands {
         return 1;
     }
 
-    private static String attachMatchingModConfig(CubePilotAgent agent, String actor, List<String> mods,
+    private static String attachMatchingModConfig(CubePilotAgent agent, String actor, List<ModInfo> mods,
             String question, String attachedContext) {
         if (attachedContext != null && !attachedContext.isBlank()) {
             return attachedContext;
@@ -323,14 +459,14 @@ public final class CubePilotCommands {
             return "";
         }
         StringBuilder context = new StringBuilder();
-        for (String modEntry : mods) {
-            String modId = modEntry.split("\\s+", 2)[0];
-            if (modId.length() < 2 || !lowerQuestion.contains(modId.toLowerCase(java.util.Locale.ROOT))) {
+        for (ModInfo mod : mods) {
+            String modId = mod.id();
+            if (modId.length() < 2 || !mod.matches(question)) {
                 continue;
             }
             List<String> paths;
             try {
-                paths = agent.files().findModConfigurationFiles(modId);
+                paths = agent.files().findModConfigurationFiles(modId, mod.name());
             } catch (IllegalArgumentException ignored) {
                 continue;
             }
@@ -391,19 +527,23 @@ public final class CubePilotCommands {
         }
     }
 
-    private static ServerSnapshot runtimeSnapshot(MinecraftServer server, String loader, List<String> mods) {
+    private static ServerSnapshot runtimeSnapshot(MinecraftServer server, String loader, List<ModInfo> mods) {
         return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader,
                 server.overworld().getDifficulty().getDisplayName().getString(),
                 server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(),
-                Map.of(), List.of(), mods);
+                Map.of(), List.of(), modTexts(mods));
     }
 
-    private static ServerSnapshot snapshot(MinecraftServer server, String loader, List<String> mods,
+    private static ServerSnapshot snapshot(MinecraftServer server, String loader, List<ModInfo> mods,
             ReadOnlyFileAccess files) throws IOException {
         String difficulty = server.overworld().getDifficulty().getDisplayName().getString();
         return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader, difficulty,
                 server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(),
-                files.readServerSettingsSnapshot(), files.configurationInventorySnapshot(), mods);
+                files.readServerSettingsSnapshot(), files.configurationInventorySnapshot(), modTexts(mods));
+    }
+
+    private static List<String> modTexts(List<ModInfo> mods) {
+        return mods.stream().map(ModInfo::displayText).toList();
     }
 
     private static void sendBoundedLines(CommandSourceStack source, String text, int maxLines, int maxLineLength) {
