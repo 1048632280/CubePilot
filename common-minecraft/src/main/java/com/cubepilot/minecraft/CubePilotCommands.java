@@ -370,10 +370,16 @@ public final class CubePilotCommands {
         int start = context.length();
         context.append("\n文件：").append(path).append('\n');
         try {
-            ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, files.read(path));
+            String contents = files.read(path);
+            ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
             context.append("格式：").append(document.format()).append('\n');
             if (document.entries().isEmpty()) {
-                context.append("（没有识别到结构化键值）\n");
+                context.append("（没有识别到结构化键值，提供脱敏原文节选）\n");
+                String excerpt = contents.replaceAll("[\\r\\n]+", " ").trim();
+                int remaining = Math.max(0, budget - (context.length() - start));
+                if (!excerpt.isEmpty() && remaining > 0) {
+                    context.append(excerpt, 0, Math.min(excerpt.length(), remaining)).append('\n');
+                }
             } else {
                 for (ConfigInspector.Entry entry : document.entries()) {
                     if (context.length() - start >= budget) {
