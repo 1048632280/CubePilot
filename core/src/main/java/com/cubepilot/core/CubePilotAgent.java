@@ -34,6 +34,21 @@ public final class CubePilotAgent {
         return current;
     }
 
+    /** 服务端加载 Mod 时只创建默认配置文件，不初始化 API 客户端。 */
+    public static void ensureConfig() throws IOException {
+        CubePilotConfig.ensureExists(Path.of(".").toAbsolutePath().normalize());
+    }
+
+    /** 原子替换 Agent；构造失败时保留旧实例和旧配置。 */
+    public static CubePilotAgent reload() throws IOException {
+        synchronized (CubePilotAgent.class) {
+            CubePilotAgent replacement = new CubePilotAgent(
+                    Path.of(".").toAbsolutePath().normalize());
+            instance = replacement;
+            return replacement;
+        }
+    }
+
     public CubePilotConfig config() {
         return config;
     }

@@ -1,7 +1,9 @@
 package com.cubepilot.neoforge;
 
 import com.cubepilot.minecraft.CubePilotCommands;
+import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.ModInfo;
+import java.io.IOException;
 import java.util.List;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModList;
@@ -14,6 +16,11 @@ public final class CubePilotNeoForgeMod {
     public static final String MOD_ID = "cubepilot";
 
     public CubePilotNeoForgeMod() {
+        try {
+            CubePilotAgent.ensureConfig();
+        } catch (IOException | IllegalArgumentException exception) {
+            System.err.println("[CubePilot] 无法创建自身配置文件：" + exception.getMessage());
+        }
         NeoForge.EVENT_BUS.register(this);
     }
 

@@ -33,7 +33,8 @@ public final class CubePilotConfig {
         this.properties = properties;
     }
 
-    public static CubePilotConfig load(Path serverRoot) throws IOException {
+    /** 只确保 CubePilot 自身配置目录和默认文件存在，不读取配置，也不连接 API。 */
+    public static Path ensureExists(Path serverRoot) throws IOException {
         Path root = serverRoot.toAbsolutePath().normalize().toRealPath();
         Path directory = root.resolve("config").resolve("cubepilot").normalize();
         if (!directory.startsWith(root)) {
@@ -54,6 +55,12 @@ public final class CubePilotConfig {
         if (!Files.isRegularFile(configPath, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("CubePilot 配置路径不是普通文件");
         }
+        return configPath;
+    }
+
+    public static CubePilotConfig load(Path serverRoot) throws IOException {
+        Path configPath = ensureExists(serverRoot);
+        Path directory = configPath.getParent();
 
         Properties properties = new Properties();
         try (Reader reader = new InputStreamReader(

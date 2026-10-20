@@ -53,6 +53,7 @@ public final class CubePilotCommands {
                 .then(Commands.literal("status").executes(context -> status(context, loader, mods)))
                 .then(Commands.literal("snapshot").executes(context -> showSnapshot(context, loader, mods)))
                 .then(Commands.literal("mods").executes(context -> showMods(context, mods)))
+                .then(Commands.literal("reload").executes(CubePilotCommands::reload))
                 .then(Commands.literal("files")
                         .executes(context -> listFiles(context, ""))
                         .then(Commands.argument("path", StringArgumentType.greedyString())
@@ -94,6 +95,7 @@ public final class CubePilotCommands {
         send(source, "命令别名：/cp、/cpilot、/cpa（需要 OP 2 级权限）");
         send(source, "/cp <问题> 或 /cp ask <问题>：查询百科/服务器状态并生成命令建议");
         send(source, "/cp status | mods：查看简要服务器状态或已加载 Mod");
+        send(source, "/cp reload：重新读取 CubePilot 自身 cubepilot.properties，不调用 API");
         send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
         send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
         send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
@@ -113,6 +115,21 @@ public final class CubePilotCommands {
             return 1;
         } catch (IllegalArgumentException exception) {
             return fail(context.getSource(), "无法读取服务器状态：" + safeMessage(exception));
+        }
+    }
+
+    private static int reload(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        try {
+            CubePilotAgent agent = CubePilotAgent.reload();
+            agent.audit().record(source.getTextName(), "config.reload", "success");
+            send(source, "已重新加载 CubePilot 配置；后续请求将使用新配置。");
+            send(source, "API 地址：" + agent.config().endpoint());
+            send(source, "模型：" + agent.config().model());
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "config.reload", "cubepilot.properties", exception);
+            return fail(source, "重新加载失败，旧配置仍在使用：" + safeMessage(exception));
         }
     }
 

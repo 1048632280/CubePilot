@@ -19,7 +19,7 @@ CubePilot 是一个只运行在 Minecraft Java 原生专用服务端上的 AI �
 
 ## 安装与配置
 
-将匹配版本的 JAR 放入服务端 `mods/`，使用对应加载器启动。首次运行后编辑 `config/cubepilot/cubepilot.properties`，或为服务端进程配置 `CUBEPILOT_API_KEY` 环境变量。设置文件中的 API Key 仅作为环境变量缺失时的回退选项；请限制配置目录的操作系统访问权限。
+将匹配版本的 JAR 放入服务端 `mods/`，使用对应加载器启动。Mod 加载时只会创建 `config/cubepilot/cubepilot.properties` 和目录，不读取 API 配置、不创建 API 客户端，也不会发起网络请求。编辑配置后，在游戏内使用 `/cp reload`（OP 2）即可让 CubePilot 重新读取自身配置，无需重启服务端；重载失败时会保留上一份有效配置。设置文件中的 API Key 仅作为环境变量缺失时的回退选项；请限制配置目录的操作系统访问权限。
 
 ```properties
 api.endpoint=https://api.openai.com/v1/chat/completions
@@ -40,6 +40,7 @@ files.max-bytes=16384
 - `/cp status`：查看简要版本、加载器、难度、在线人数和白名单状态。
 - `/cp snapshot`：查看运行状态、`server.properties` 安全字段及白名单配置/日志/崩溃文件路径；不会读取清单中文件的内容。
 - `/cp mods`：查看已加载 Mod。
+- `/cp reload`：重新读取 CubePilot 自身的 `config/cubepilot/cubepilot.properties`，不调用 API；不会热加载其他 Mod 的配置。
 - `/cp files [目录]`：列出只读允许目录。
 - `/cp read <相对路径>`：读取并做常见凭据脱敏。
 - `/cp analyze <路径>`：使用本地规则离线分析日志、崩溃报告或配置，不调用外部 API。
