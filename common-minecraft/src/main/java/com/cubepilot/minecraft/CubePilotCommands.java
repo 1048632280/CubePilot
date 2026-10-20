@@ -15,6 +15,7 @@ import com.mojang.brigadier.ParseResults;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
@@ -563,7 +564,7 @@ public final class CubePilotCommands {
         sendBoundedLines(source, reply.answer(), 20, 1000);
         int accepted = 0;
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
-                .map(player -> player.getGameProfile().getName())
+                .map(onlinePlayer -> onlinePlayer.getGameProfile().getName())
                 .toList();
         boolean autoExecuted = false;
         for (String suggestion : reply.commandSuggestions()) {
@@ -583,17 +584,14 @@ public final class CubePilotCommands {
             }
 
             if (decision.automatic() && !autoExecuted) {
+                autoExecuted = true;
                 try {
-                    int result = source.getServer().getCommands().performPrefixedCommand(source, raw);
-                    agent.audit().record(source.getTextName(), result > 0
-                                    ? "command.auto-executed" : "command.auto-result-zero",
+                    int result = source.getServer().getCommands().getDispatcher().execute(parsed);
+                    agent.audit().record(source.getTextName(), "command.auto-executed",
                             "command=" + command + " result=" + result + " reason=" + decision.reason());
-                    send(source, result > 0
-                            ? "已按自动白名单执行：" + command
-                            : "命令已按自动白名单提交，但服务器未返回成功结果（0）；请检查游戏状态和审计日志。");
+                    send(source, "已按自动白名单执行：" + command);
                     accepted++;
-                    autoExecuted = true;
-                } catch (RuntimeException exception) {
+                } catch (CommandSyntaxException | RuntimeException exception) {
                     agent.audit().record(source.getTextName(), "command.auto-error",
                             "command=" + command + " error=" + safeMessage(exception));
                     send(source, "自动执行失败：" + safeMessage(exception));
