@@ -39,9 +39,9 @@ public final class OpenAiClient {
     }
 
     public CompletableFuture<AgentIntent> classify(String question) {
-        String system = "你是 CubePilot 请求路由器。只输出 JSON：{\"intent\":\"ASK|CONFIG|ANALYZE|COMMAND\"}。"
-                + "CONFIG 仅用于查找 Mod 配置，ANALYZE 用于日志、崩溃报告或配置诊断，COMMAND 用于生成 Minecraft 指令或物品 NBT，"
-                + "其他问题使用 ASK。不要输出 Markdown。";
+        String system = "将请求分为 ASK、CONFIG、ANALYZE、COMMAND。CONFIG=查找 Mod 配置；"
+                + "ANALYZE=诊断日志/崩溃/配置；COMMAND=生成游戏指令或物品；其余=ASK。"
+                + "只输出 JSON：{\"intent\":\"ASK|CONFIG|ANALYZE|COMMAND\"}。";
         String user = "管理员请求：\n" + (question == null ? "" : question);
         return sendNormal(system, user, 48).thenApply(response -> parseIntent(response.body()));
     }
@@ -370,7 +370,14 @@ public final class OpenAiClient {
                     break;
                 }
             }
-            return new AssistantReply(answer, commands);
+            boolean clarificationRequired = json.has("clarification_required")
+                    && json.get("clarification_required").isJsonPrimitive()
+                    && json.getAsJsonPrimitive("clarification_required").isBoolean()
+                    && json.get("clarification_required").getAsBoolean();
+            if (clarificationRequired && !commands.isEmpty()) {
+                throw new IllegalArgumentException("澄清回复不能包含命令候选");
+            }
+            return new AssistantReply(answer, commands, clarificationRequired);
         } catch (RuntimeException exception) {
             throw new java.util.concurrent.CompletionException(new IOException(
                     "AI 返回格式无效：未能解析 answer 或 command_suggestions，请重试", exception));

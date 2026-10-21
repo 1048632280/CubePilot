@@ -32,6 +32,23 @@ class OpenAiClientTest {
     }
 
     @Test
+    void clarificationReplyMustNotContainCommandCandidates() {
+        AssistantReply reply = OpenAiClient.parseStructuredContent(
+                "{\"answer\":\"你要哪一种剑？\",\"command_suggestions\":[],"
+                        + "\"clarification_required\":true}");
+
+        assertEquals(true, reply.clarificationRequired());
+        assertEquals(0, reply.commandSuggestions().size());
+    }
+
+    @Test
+    void rejectsCommandsAttachedToClarification() {
+        assertThrows(CompletionException.class, () -> OpenAiClient.parseStructuredContent(
+                "{\"answer\":\"确认吗？\",\"command_suggestions\":[\"give @s diamond\"],"
+                        + "\"clarification_required\":true}"));
+    }
+
+    @Test
     void streamingExtractorOnlyEmitsAnswerAndHidesJsonAndCommands() {
         List<String> visible = new ArrayList<>();
         OpenAiClient.AnswerExtractor extractor = new OpenAiClient.AnswerExtractor(visible::add);

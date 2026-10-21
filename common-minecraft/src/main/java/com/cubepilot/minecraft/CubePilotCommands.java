@@ -32,6 +32,7 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -40,7 +41,9 @@ public final class CubePilotCommands {
     private static final String PREFIX = "[CubePilot] ";
     private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
     private static final long ALLOW_CONFIRM_TTL_MILLIS = 120_000L;
+    private static final long CLARIFICATION_TTL_MILLIS = 120_000L;
     private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
+    private static final Map<UUID, PendingClarification> PENDING_CLARIFICATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, Long> CHAT_COOLDOWNS = new ConcurrentHashMap<>();
     private static final String ASK_TASK_PROMPT =
             "任务：简短回答百科或服务器问题。只给最终结论；需要命令时只给必要命令，不解释执行过程。";
@@ -48,6 +51,10 @@ public final class CubePilotCommands {
             "任务：只读定位 Mod 配置。自行从扫描证据识别 Mod；answer 分段输出，每项依次写 Mod、文件路径、行号/键、当前值、手工改法。最多 8 行，每行不超过 160 字；证据不足就只说未找到。不要输出命令。";
     private static final String ANALYZE_TASK_PROMPT =
             "任务：只读诊断日志、崩溃报告或配置。按‘结论；证据；建议’分段，最多 6 行，每行不超过 160 字；不确定时明确写不确定。不要输出命令。";
+    private static final String COMMAND_TASK_PROMPT =
+            "任务：把明确的 Minecraft 操作转成最少且完整的命令候选。按服务器版本使用正确语法，勿声称已执行。"
+                    + "物品/目标明确时直接生成；只有错别字导致无法识别、多个同名候选或缺少关键属性时才澄清。"
+                    + "澄清只问一个最关键问题，不输出命令；收到补充后继续原请求。拒绝无关危险操作。";
 
     private CubePilotCommands() {
     }
@@ -270,7 +277,7 @@ public final class CubePilotCommands {
             auditDenied(source, "file.analyze", request, exception);
             return fail(source, exception.getMessage());
         }
-        send(source, "正在后台检索相关日志、崩溃报告和配置；不会阻塞服务器线程。");
+        send(source, "正在处理，请稍候…");
         CompletableFuture<ServerSnapshot> snapshot = snapshotAsync(
                 source.getServer(), loader, mods, agent.files());
         CubePilotTasks.supplyAsync(() -> {
@@ -336,18 +343,29 @@ public final class CubePilotCommands {
         }
         try {
             CubePilotAgent agent = CubePilotAgent.get();
-            send(source, "正在识别请求类型；普通聊天不会触发此流程。");
+            ServerPlayer player = source.getEntity() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
+            PendingClarification pending = player == null ? null
+                    : PENDING_CLARIFICATIONS.remove(player.getUUID());
+            if (pending != null) {
+                if (pending.expiresAtMillis() > System.currentTimeMillis()) {
+                    String combined = pending.question() + "\n玩家补充：" + question;
+                    return askDirect(source, loader, mods, combined, attachedContext, COMMAND_TASK_PROMPT, true);
+                }
+            }
+            send(source, "正在处理，请稍候…");
             agent.classify(question).whenComplete((intent, error) -> source.getServer().execute(() -> {
                 if (error != null) {
                     agent.audit().record(source.getTextName(), "request.route.error", safeMessage(error));
-                    send(source, "请求类型识别失败：" + shortText(safeMessage(error), 160));
+                    send(source, "识别失败：" + shortText(safeMessage(error), 160));
                     return;
                 }
                 AgentIntent selected = intent == null ? AgentIntent.ASK : intent;
                 switch (selected) {
                     case CONFIG -> configRequest(source, loader, mods, question);
                     case ANALYZE -> analyzeRequest(source, loader, mods, question);
-                    case ASK, COMMAND -> askDirect(source, loader, mods, question, attachedContext);
+                    case ASK -> askDirect(source, loader, mods, question, attachedContext, ASK_TASK_PROMPT, false);
+                    case COMMAND -> askDirect(source, loader, mods, question, attachedContext,
+                            COMMAND_TASK_PROMPT, true);
                 }
             }));
             return 1;
@@ -362,7 +380,7 @@ public final class CubePilotCommands {
             CubePilotAgent agent = CubePilotAgent.get();
             agent.audit().record(source.getTextName(), "config.auto-discover",
                     "question_length=" + question.length());
-            send(source, "正在异步扫描全部白名单 Mod 配置，并交给模型判断；不会读取凭据或修改文件。");
+            send(source, "正在查找配置，请稍候…");
             boolean useStreaming = agent.config().streaming();
             StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
             snapshotAsync(source.getServer(), loader, mods, agent.files()).thenCompose(snapshot ->
@@ -495,7 +513,7 @@ public final class CubePilotCommands {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
         agent.audit().record(source.getTextName(), "request.start", "question_length=" + question.length());
-        send(source, "正在联系配置的 OpenAI 兼容 API；等待期间服务器线程不会被阻塞。");
+        send(source, "正在处理，请稍候…");
         boolean useStreaming = !allowCommands && agent.config().streaming();
         StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
         snapshotAsync(source.getServer(), loader, mods, agent.files())
@@ -513,7 +531,7 @@ public final class CubePilotCommands {
                 return;
             }
             agent.audit().record(source.getTextName(), "request.complete", "answer_length=" + reply.answer().length());
-            renderReply(source, agent, reply, allowCommands, display != null && display.hasSent());
+            renderReply(source, agent, reply, allowCommands, display != null && display.hasSent(), question);
         }));
         return 1;
     }
@@ -525,6 +543,11 @@ public final class CubePilotCommands {
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
             AssistantReply reply, boolean allowCommands, boolean answerAlreadySent) {
+        renderReply(source, agent, reply, allowCommands, answerAlreadySent, "");
+    }
+
+    private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
+            AssistantReply reply, boolean allowCommands, boolean answerAlreadySent, String requestQuestion) {
         if (!(source.getEntity() instanceof ServerPlayer player)
                 || source.getServer().getPlayerList().getPlayer(player.getUUID()) != player) {
             agent.audit().record(source.getTextName(), "request.response.discarded", "requesting player is offline");
@@ -537,6 +560,16 @@ public final class CubePilotCommands {
             }
             if (!answerAlreadySent) {
                 sendCompactLines(source, reply.answer(), 8, 180);
+            }
+            return;
+        }
+        if (reply.clarificationRequired()) {
+            if (source.getEntity() instanceof ServerPlayer player) {
+                pruneExpiredClarifications();
+                PENDING_CLARIFICATIONS.put(player.getUUID(), new PendingClarification(
+                        requestQuestion, System.currentTimeMillis() + CLARIFICATION_TTL_MILLIS));
+                send(source, shortText(reply.answer(), 180));
+                send(source, "请用 /cp <补充信息> 继续；2 分钟内有效。未确认前不会生成或执行命令。");
             }
             return;
         }
@@ -572,7 +605,7 @@ public final class CubePilotCommands {
                     int result = source.getServer().getCommands().getDispatcher().execute(validated.parsed());
                     agent.audit().record(source.getTextName(), "command.auto-executed",
                             "command=" + command + " result=" + result + " reason=" + decision.reason());
-                    send(source, "已执行：" + shortText(command, 180));
+                    send(source, "操作已成功执行。");
                     return;
                 } catch (CommandSyntaxException | RuntimeException exception) {
                     agent.audit().record(source.getTextName(), "command.auto-error",
@@ -597,10 +630,12 @@ public final class CubePilotCommands {
         if (!manualCommands.isEmpty() || !offerCommands.isEmpty()) {
             sendCompactLines(source, reply.answer(), 8, 180);
             for (String command : manualCommands) {
-                Component clickable = Component.literal("建议：[点击填入后回车] " + shortText(command, 220))
-                        .withStyle(ChatFormatting.GREEN)
-                        .withStyle(style -> style.withClickEvent(
-                                new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, command)));
+                Component clickable = Component.literal("手动执行：[点击输入]")
+                        .withStyle(ChatFormatting.YELLOW)
+                        .withStyle(style -> style
+                                .withClickEvent(new ClickEvent(ClickEvent.Action.SUGGEST_COMMAND, command))
+                                .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                                        Component.literal(command))));
                 source.sendSuccess(() -> clickable, false);
             }
             for (String command : offerCommands) {
@@ -850,6 +885,14 @@ public final class CubePilotCommands {
     }
 
     private record PendingAllow(String actor, String command, long expiresAtMillis, PendingStage stage) {
+    }
+
+    private static void pruneExpiredClarifications() {
+        long now = System.currentTimeMillis();
+        PENDING_CLARIFICATIONS.entrySet().removeIf(entry -> entry.getValue().expiresAtMillis() <= now);
+    }
+
+    private record PendingClarification(String question, long expiresAtMillis) {
     }
 
     private enum PendingStage {
