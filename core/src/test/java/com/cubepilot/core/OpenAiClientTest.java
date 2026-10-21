@@ -1,7 +1,9 @@
 package com.cubepilot.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -9,6 +11,23 @@ import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 
 class OpenAiClientTest {
+
+    @Test
+    void parsesGenericCommandVerificationAndRejectsMissingConstraints() {
+        String complete = "{\"choices\":[{\"message\":{\"content\":"
+                + "\"{\\\"results\\\":[{\\\"command\\\":\\\"give @s diamond\\\","
+                + "\\\"complete\\\":true,\\\"missing_requirements\\\":[],\\\"reason\\\":\\\"\\\"}]}\"}}]}";
+        assertTrue(OpenAiClient.parseCommandVerification(complete).get(0).complete());
+
+        String incomplete = "{\"choices\":[{\"message\":{\"content\":"
+                + "\"{\\\"results\\\":[{\\\"command\\\":\\\"give @s diamond\\\","
+                + "\\\"complete\\\":false,\\\"missing_requirements\\\":[\\\"请求条件未表达\\\"],"
+                + "\\\"reason\\\":\\\"缺少请求条件\\\"}]}\"}}]}";
+        assertFalse(OpenAiClient.parseCommandVerification(incomplete).get(0).complete());
+        assertEquals("请求条件未表达", OpenAiClient.parseCommandVerification(incomplete)
+                .get(0).missingRequirements().get(0));
+    }
+
     @Test
     void parsesCommandsWithEscapedQuotesAndExtraMarkdown() {
         AssistantReply reply = OpenAiClient.parseStructuredContent(

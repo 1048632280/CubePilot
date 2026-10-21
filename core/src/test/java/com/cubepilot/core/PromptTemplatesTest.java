@@ -34,5 +34,7 @@ class PromptTemplatesTest {
         assertTrue(PromptTemplates.COMMAND.contains("没有找到这个物品，请重新输入"));
         assertTrue(PromptTemplates.COMMAND.contains("不得把原始命令或整段 NBT 展示给玩家"));
         assertTrue(PromptTemplates.COMMAND.contains("点击组件填充完整命令"));
+        assertTrue(PromptTemplates.COMMAND_VERIFIER.contains("候选独立核对"));
+        assertTrue(PromptTemplates.COMMAND_VERIFIER.contains("无法确认"));
     }
 }

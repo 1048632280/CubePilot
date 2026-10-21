@@ -43,4 +43,16 @@ class AuditLogTest {
         assertTrue(Files.isRegularFile(directory.resolve("audit.1.jsonl")));
         assertTrue(Files.size(directory.resolve("audit.jsonl")) <= 1024L * 1024L);
     }
+
+    @Test
+    void recordsTraceFieldsWithoutSecrets() throws IOException {
+        AuditLog audit = new AuditLog(directory);
+        audit.recordTrace("req-1", "Admin", "model.output", "api.key=top-secret", "answer=ok");
+
+        String content = Files.readString(directory.resolve("trace.jsonl"));
+        assertTrue(content.contains("\"request_id\":\"req-1\""));
+        assertTrue(content.contains("\"output\":\"answer=ok\""));
+        assertTrue(content.contains("[已隐藏]"));
+        assertFalse(content.contains("top-secret"));
+    }
 }

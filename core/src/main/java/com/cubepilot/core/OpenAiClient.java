@@ -53,6 +53,77 @@ public final class OpenAiClient {
         return sendNormal(system, user, 512).thenApply(response -> parseIntent(response.body()));
     }
 
+    /** 由独立模型请求逐项核验候选命令是否保留原请求约束。 */
+    public CompletableFuture<java.util.List<CommandVerification>> verifyCommand(String question,
+            java.util.List<String> commands,
+            String attachedContext) {
+        JsonObject request = new JsonObject();
+        request.addProperty("request", question == null ? "" : question);
+        JsonArray candidates = new JsonArray();
+        commands.forEach(candidates::add);
+        request.add("candidate_commands", candidates);
+        request.addProperty("server_context", attachedContext == null ? "" : attachedContext);
+        return sendNormal(PromptTemplates.COMMAND_VERIFIER, request.toString(), 768)
+                .thenApply(response -> {
+                    java.util.List<CommandVerification> results = parseCommandVerification(response.body());
+                    if (results.size() != commands.size()) {
+                        throw new java.util.concurrent.CompletionException(
+                                new IOException("命令完整性核验未覆盖全部候选"));
+                    }
+                    for (int index = 0; index < commands.size(); index++) {
+                        if (!commands.get(index).equals(results.get(index).command())) {
+                            throw new java.util.concurrent.CompletionException(
+                                    new IOException("命令完整性核验候选不匹配"));
+                        }
+                    }
+                    return results;
+                });
+    }
+
+    static java.util.List<CommandVerification> parseCommandVerification(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices == null || choices.isEmpty()) throw new IllegalArgumentException("无核验结果");
+            JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
+            String content = contentToText(message == null ? null : message.get("content"));
+            JsonObject result = JsonParser.parseString(extractJsonObject(content)).getAsJsonObject();
+            JsonArray results = result.getAsJsonArray("results");
+            if (results == null || results.isEmpty()) throw new IllegalArgumentException("缺少逐条核验结果");
+            java.util.ArrayList<CommandVerification> verifications = new java.util.ArrayList<>();
+            for (JsonElement element : results) {
+                if (!element.isJsonObject()) throw new IllegalArgumentException("核验项格式无效");
+                JsonObject item = element.getAsJsonObject();
+                JsonElement commandValue = item.get("command");
+                JsonElement completeValue = item.get("complete");
+                if (commandValue == null || !commandValue.isJsonPrimitive()
+                        || !commandValue.getAsJsonPrimitive().isString()
+                        || completeValue == null || !completeValue.isJsonPrimitive()
+                        || !completeValue.getAsJsonPrimitive().isBoolean()) {
+                    throw new IllegalArgumentException("核验项缺少 command 或 complete");
+                }
+                java.util.ArrayList<String> missing = new java.util.ArrayList<>();
+                JsonElement missingValue = item.get("missing_requirements");
+                if (missingValue != null && missingValue.isJsonArray()) {
+                    for (JsonElement missingItem : missingValue.getAsJsonArray()) {
+                        if (missingItem.isJsonPrimitive() && missingItem.getAsJsonPrimitive().isString()) {
+                            missing.add(missingItem.getAsString());
+                        }
+                    }
+                }
+                JsonElement reasonValue = item.get("reason");
+                String reason = reasonValue != null && reasonValue.isJsonPrimitive()
+                        ? reasonValue.getAsString() : "";
+                verifications.add(new CommandVerification(commandValue.getAsString(),
+                        completeValue.getAsBoolean(), missing, reason));
+            }
+            return java.util.List.copyOf(verifications);
+        } catch (RuntimeException exception) {
+            throw new java.util.concurrent.CompletionException(
+                    new IOException("命令完整性核验失败，候选不会执行", exception));
+        }
+    }
+
     /**
      * 请求 SSE 流式响应。回调只接收 answer 字段的文字增量，绝不接收命令字段或 JSON 标记。
      */
@@ -215,6 +286,7 @@ public final class OpenAiClient {
     private static AssistantReply readStreamingResponse(InputStream input, Consumer<String> answerConsumer) {
         StringBuilder content = new StringBuilder();
         AnswerExtractor extractor = new AnswerExtractor(answerConsumer);
+        boolean[] sawReasoning = {false};
         try (InputStream stream = input;
                 BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
             String line;
@@ -237,6 +309,10 @@ public final class OpenAiClient {
                 JsonObject choice = choices.get(0).getAsJsonObject();
                 JsonObject delta = choice.getAsJsonObject("delta");
                 JsonElement piece = delta == null ? null : delta.get("content");
+                JsonElement reasoning = delta == null ? null : delta.get("reasoning_content");
+                if (reasoning != null && !reasoning.isJsonNull() && !contentToText(reasoning).isBlank()) {
+                    sawReasoning[0] = true;
+                }
                 if (piece != null && piece.isJsonPrimitive() && piece.getAsJsonPrimitive().isString()) {
                     String text = piece.getAsString();
                     content.append(text);
@@ -244,6 +320,9 @@ public final class OpenAiClient {
                 }
             }
             if (content.length() == 0) {
+                if (sawReasoning[0]) {
+                    return new AssistantReply("模型未返回可用答案，请重试。", java.util.List.of());
+                }
                 throw new IOException("模型接口没有返回流式内容");
             }
             return parseStructuredContent(content.toString());
@@ -368,6 +447,10 @@ public final class OpenAiClient {
             JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
             JsonElement contentElement = message == null ? null : message.get("content");
             if (contentElement == null || contentElement.isJsonNull()) {
+                JsonElement reasoning = message == null ? null : message.get("reasoning_content");
+                if (reasoning != null && !reasoning.isJsonNull() && !contentToText(reasoning).isBlank()) {
+                    return new AssistantReply("模型未返回可用答案，请重试。", java.util.List.of());
+                }
                 throw new java.util.concurrent.CompletionException(new IOException("模型接口返回了空内容"));
             }
             String content = contentToText(contentElement);

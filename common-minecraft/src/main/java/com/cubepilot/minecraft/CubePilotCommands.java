@@ -4,6 +4,7 @@ import com.cubepilot.core.AssistantReply;
 import com.cubepilot.core.AgentIntent;
 import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
+import com.cubepilot.core.CommandVerification;
 import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.CubePilotTasks;
@@ -43,6 +44,8 @@ public final class CubePilotCommands {
     private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
     private static final long ALLOW_CONFIRM_TTL_MILLIS = 120_000L;
     private static final long CLARIFICATION_TTL_MILLIS = 120_000L;
+    /** 服务端聊天窗口按像素显示；保守限制可避免客户端再次把中文拆成单字行。 */
+    private static final int MAX_DISPLAY_WIDTH = 48;
     private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
     private static final Map<UUID, PendingClarification> PENDING_CLARIFICATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, Long> CHAT_COOLDOWNS = new ConcurrentHashMap<>();
@@ -258,6 +261,11 @@ public final class CubePilotCommands {
 
     private static int analyzeRequest(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, boolean announce) {
+        return analyzeRequest(source, loader, mods, question, announce, UUID.randomUUID().toString());
+    }
+
+    private static int analyzeRequest(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, boolean announce, String requestId) {
         String request = question == null ? "" : question.trim();
         if (request.isBlank() || request.length() > 4000) {
             return fail(source, "诊断问题不能为空且长度不能超过 4000 个字符。");
@@ -270,6 +278,7 @@ public final class CubePilotCommands {
             return fail(source, exception.getMessage());
         }
         if (announce) send(source, "正在处理，请稍候…");
+        agent.audit().recordTrace(requestId, actorId(source), "analyze.input", request, "开始只读扫描");
         CompletableFuture<ServerSnapshot> snapshot = snapshotAsync(
                 source.getServer(), loader, mods, agent.files());
         CubePilotTasks.supplyAsync(() -> {
@@ -279,7 +288,7 @@ public final class CubePilotCommands {
                 throw new CompletionException(exception);
             }
         }).thenCombine(snapshot, AnalysisContext::new)
-                .thenCompose(context -> agent.ask(request, context.text(), context.snapshot(), 44000,
+                .thenCompose(context -> agent.ask(actorId(source), request, context.text(), context.snapshot(), 44000,
                         PromptTemplates.ANALYZE))
                 .whenComplete((reply, error) -> source.getServer().execute(() -> {
             if (error != null) {
@@ -288,7 +297,9 @@ public final class CubePilotCommands {
                 return;
             }
             agent.audit().record(source.getTextName(), "file.analyze", "question_length=" + request.length());
-            renderReply(source, agent, reply, false);
+            agent.audit().recordTrace(requestId, actorId(source), "analyze.output", request, replySummary(reply));
+            agent.remember(actorId(source), request, reply, "已回复");
+            renderReply(source, agent, reply, false, false, request, requestId);
         }));
         return 1;
     }
@@ -346,20 +357,28 @@ public final class CubePilotCommands {
                             false);
                 }
             }
-            agent.classify(question).whenComplete((intent, error) -> source.getServer().execute(() -> {
+            String requestId = UUID.randomUUID().toString();
+            agent.audit().recordTrace(requestId, actorId(source), "request.input", question,
+                    "conversation_turns=" + agent.conversationSize(actorId(source)));
+            agent.classify(actorId(source), question).whenComplete((intent, error) -> source.getServer().execute(() -> {
                 if (error != null) {
                     agent.audit().record(source.getTextName(), "request.route.error", safeMessage(error));
-                    askDirect(source, loader, mods, question, attachedContext, PromptTemplates.AUTO, true, false);
+                    agent.audit().recordTrace(requestId, actorId(source), "classifier.error", question,
+                            safeMessage(error));
+                    askDirect(source, loader, mods, question, attachedContext, PromptTemplates.AUTO, true, false,
+                            requestId);
                     return;
                 }
                 AgentIntent selected = intent == null ? AgentIntent.ASK : intent;
+                agent.audit().recordTrace(requestId, actorId(source), "classifier.result", question,
+                        selected.name());
                 switch (selected) {
-                    case CONFIG -> askDiscoveredModConfig(source, loader, mods, question, false);
-                    case ANALYZE -> analyzeRequest(source, loader, mods, question, false);
+                    case CONFIG -> askDiscoveredModConfig(source, loader, mods, question, false, requestId);
+                    case ANALYZE -> analyzeRequest(source, loader, mods, question, false, requestId);
                     case ASK -> askDirect(source, loader, mods, question, attachedContext, PromptTemplates.AUTO, true,
-                            false);
+                            false, requestId);
                     case COMMAND -> askDirect(source, loader, mods, question, attachedContext,
-                            PromptTemplates.COMMAND, true, false);
+                            PromptTemplates.COMMAND, true, false, requestId);
                 }
             }));
             return 1;
@@ -370,10 +389,16 @@ public final class CubePilotCommands {
 
     private static int askDiscoveredModConfig(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, boolean announce) {
+        return askDiscoveredModConfig(source, loader, mods, question, announce, UUID.randomUUID().toString());
+    }
+
+    private static int askDiscoveredModConfig(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, boolean announce, String requestId) {
         try {
             CubePilotAgent agent = CubePilotAgent.get();
             agent.audit().record(source.getTextName(), "config.auto-discover",
                     "question_length=" + question.length());
+            agent.audit().recordTrace(requestId, actorId(source), "config.input", question, "开始广泛只读扫描");
             if (announce) send(source, "正在处理，请稍候…");
             boolean useStreaming = agent.config().streaming();
             StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
@@ -388,9 +413,9 @@ public final class CubePilotCommands {
                 agent.audit().record(source.getTextName(), "config.scan.complete",
                         "context_length=" + attachedContext.length());
                 return useStreaming
-                        ? agent.askStreaming(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
+                        ? agent.askStreaming(actorId(source), question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
                                 PromptTemplates.CONFIG, display::accept)
-                        : agent.ask(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
+                        : agent.ask(actorId(source), question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
                                 PromptTemplates.CONFIG);
                 })).whenComplete((reply, error) -> source.getServer().execute(() -> {
                 if (display != null) {
@@ -403,7 +428,9 @@ public final class CubePilotCommands {
                 }
                 agent.audit().record(source.getTextName(), "config.request.complete",
                         "answer_length=" + reply.answer().length());
-                renderReply(source, agent, reply, false, display != null && display.hasSent());
+                agent.audit().recordTrace(requestId, actorId(source), "config.output", question, replySummary(reply));
+                agent.remember(actorId(source), question, reply, "已回复");
+                renderReply(source, agent, reply, false, display != null && display.hasSent(), question, requestId);
                 }));
             return 1;
         } catch (IOException | IllegalArgumentException exception) {
@@ -501,6 +528,13 @@ public final class CubePilotCommands {
     private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext,
             String taskPrompt, boolean allowCommands, boolean announce) {
+        return askDirect(source, loader, mods, question, attachedContext, taskPrompt, allowCommands,
+                announce, UUID.randomUUID().toString());
+    }
+
+    private static int askDirect(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, String attachedContext,
+            String taskPrompt, boolean allowCommands, boolean announce, String requestId) {
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
         }
@@ -511,25 +545,68 @@ public final class CubePilotCommands {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
         agent.audit().record(source.getTextName(), "request.start", "question_length=" + question.length());
+        agent.audit().recordTrace(requestId, actorId(source), "request.input",
+                "task_prompt=" + taskPrompt + "\nquestion=" + question,
+                attachedContext == null ? "" : attachedContext);
         if (announce) send(source, "正在处理，请稍候…");
         boolean useStreaming = !allowCommands && agent.config().streaming();
         StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
         snapshotAsync(source.getServer(), loader, mods, agent.files())
-                .thenCompose(snapshot -> useStreaming
-                        ? agent.askStreaming(question, attachedContext, snapshot, 16000, taskPrompt,
-                                display::accept)
-                        : agent.ask(question, attachedContext, snapshot, 16000, taskPrompt))
+                .thenCompose(snapshot -> {
+                    CompletableFuture<AssistantReply> generated = useStreaming
+                            ? agent.askStreaming(actorId(source), question, attachedContext, snapshot, 16000,
+                                    taskPrompt, display::accept)
+                            : agent.ask(actorId(source), question, attachedContext, snapshot, 16000, taskPrompt);
+                    if (!allowCommands) return generated;
+                    return generated.thenCompose(reply -> {
+                        if (reply.commandSuggestions().isEmpty() || reply.clarificationRequired()) {
+                            return CompletableFuture.completedFuture(reply);
+                        }
+                        String evidence = "服务器快照：\n" + snapshot.toPromptText()
+                                + "\n请求附加上下文：\n" + (attachedContext == null ? "" : attachedContext);
+                        return agent.verifyCommands(actorId(source), question,
+                                reply.commandSuggestions(), evidence).thenApply(verifications -> {
+                            List<String> verifiedCommands = new ArrayList<>();
+                            List<String> missing = new ArrayList<>();
+                            for (CommandVerification verification : verifications) {
+                                String candidate = verification.command();
+                                agent.audit().recordTrace(requestId, actorId(source), "command.verification",
+                                        candidate, verificationSummary(verification));
+                                if (verification.complete()) {
+                                    verifiedCommands.add(candidate);
+                                } else {
+                                    missing.addAll(verification.missingRequirements());
+                                    if (verification.missingRequirements().isEmpty()
+                                            && !verification.reason().isBlank()) {
+                                        missing.add(verification.reason());
+                                    }
+                                }
+                            }
+                            if (!verifiedCommands.isEmpty()) {
+                                return new AssistantReply(reply.answer(), verifiedCommands,
+                                        reply.clarificationRequired());
+                            }
+                            String details = missing.isEmpty() ? "" : "（" + shortText(String.join("、", missing), 120) + "）";
+                            return new AssistantReply("未能确认候选命令完整满足请求，未执行。" + details, List.of());
+                        });
+                    });
+                })
                 .whenComplete((reply, error) -> source.getServer().execute(() -> {
             if (display != null) {
                 display.flush();
             }
             if (error != null) {
                 agent.audit().record(source.getTextName(), "request.error", safeMessage(error));
+                agent.audit().recordTrace(requestId, actorId(source), "model.error", question,
+                        safeMessage(error));
                 send(source, "请求失败：" + shortText(safeMessage(error), 180));
                 return;
             }
             agent.audit().record(source.getTextName(), "request.complete", "answer_length=" + reply.answer().length());
-            renderReply(source, agent, reply, allowCommands, display != null && display.hasSent(), question);
+            agent.audit().recordTrace(requestId, actorId(source), "model.output", question,
+                    replySummary(reply));
+            agent.remember(actorId(source), question, reply, "已收到回复");
+            renderReply(source, agent, reply, allowCommands, display != null && display.hasSent(), question, requestId);
         }));
         return 1;
     }
@@ -546,6 +623,12 @@ public final class CubePilotCommands {
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
             AssistantReply reply, boolean allowCommands, boolean answerAlreadySent, String requestQuestion) {
+        renderReply(source, agent, reply, allowCommands, answerAlreadySent, requestQuestion, "");
+    }
+
+    private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
+            AssistantReply reply, boolean allowCommands, boolean answerAlreadySent, String requestQuestion,
+            String requestId) {
         if (!(source.getEntity() instanceof ServerPlayer player)
                 || source.getServer().getPlayerList().getPlayer(player.getUUID()) != player) {
             agent.audit().record(source.getTextName(), "request.response.discarded", "requesting player is offline");
@@ -566,6 +649,7 @@ public final class CubePilotCommands {
             PENDING_CLARIFICATIONS.put(player.getUUID(), new PendingClarification(
                     requestQuestion, System.currentTimeMillis() + CLARIFICATION_TTL_MILLIS));
             sendCompactLines(source, shortText(reply.answer(), 160) + "\n2 分钟内回复即可。", 2, 180);
+            agent.updateConversationOutcome(actorId(source), "等待补充信息");
             return;
         }
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
@@ -600,12 +684,18 @@ public final class CubePilotCommands {
                     int result = source.getServer().getCommands().getDispatcher().execute(validated.parsed());
                     agent.audit().record(source.getTextName(), "command.auto-executed",
                             "command=" + command + " result=" + result + " reason=" + decision.reason());
-                    send(source, "操作已成功执行。");
+                    agent.audit().recordTrace(requestId, actorId(source), "command.executed", command,
+                            "result=" + result);
+                    sendExecuted(source, command);
+                    agent.updateConversationOutcome(actorId(source), "已成功执行：" + readableCommand(command));
                     return;
                 } catch (CommandSyntaxException | RuntimeException exception) {
                     agent.audit().record(source.getTextName(), "command.auto-error",
                             "command=" + command + " error=" + safeMessage(exception));
+                    agent.audit().recordTrace(requestId, actorId(source), "command.execution-error", command,
+                            safeMessage(exception));
                     send(source, "执行失败：" + shortText(safeMessage(exception), 160));
+                    agent.updateConversationOutcome(actorId(source), "执行失败：" + shortText(safeMessage(exception), 120));
                     return;
                 }
             }
@@ -614,6 +704,8 @@ public final class CubePilotCommands {
                 manualCommands.add(command);
                 agent.audit().record(source.getTextName(), "command.suggested",
                         "command=" + command + " reason=" + decision.reason());
+                agent.audit().recordTrace(requestId, actorId(source), "command.suggested", requestQuestion,
+                        command);
             }
             if (decision.offerAddToAutoAllow()) {
                 offerCommands.add(command);
@@ -635,6 +727,7 @@ public final class CubePilotCommands {
                                         Component.literal(command))));
                 source.sendSuccess(() -> clickable, false);
             }
+            agent.updateConversationOutcome(actorId(source), "等待玩家手动执行");
             for (String command : offerCommands) {
                 pruneExpiredPendingAllows();
                 String token = newToken();
@@ -649,6 +742,9 @@ public final class CubePilotCommands {
         } else if (!reply.commandSuggestions().isEmpty()) {
             send(source, "命令未执行：" + shortText(
                     rejectionReason == null ? "未通过安全或语法检查" : rejectionReason, 120));
+            agent.audit().recordTrace(requestId, actorId(source), "command.rejected", requestQuestion,
+                    rejectionReason == null ? "未通过安全或语法检查" : rejectionReason);
+            agent.updateConversationOutcome(actorId(source), "命令被安全策略或语法检查拒绝");
         } else {
             sendCompactLines(source, reply.answer(), 8, 180);
         }
@@ -712,20 +808,22 @@ public final class CubePilotCommands {
         int sent = 0;
         boolean truncated = false;
         boolean prefixPending = includePrefix;
-        for (String rawLine : text.replace('\r', '\n').split("\\n")) {
+        for (String rawLine : text.replace("\r\n", "\n").replace('\r', '\n').split("\\n")) {
             String remaining = rawLine.trim();
+            if (remaining.isEmpty()) continue;
             while (!remaining.isEmpty()) {
                 if (sent >= maxLines) {
                     truncated = true;
                     break;
                 }
-                if (remaining.length() <= maxLineLength) {
+                if (displayWidth(remaining) <= MAX_DISPLAY_WIDTH && remaining.length() <= maxLineLength) {
                     sendReplyLine(source, remaining, prefixPending);
                     prefixPending = false;
                     sent++;
                     break;
                 }
-                int cut = findWrapPoint(remaining, maxLineLength);
+                int availableWidth = Math.max(20, MAX_DISPLAY_WIDTH - (prefixPending ? 14 : 0));
+                int cut = findWrapPoint(remaining, maxLineLength, availableWidth);
                 sendReplyLine(source, remaining.substring(0, cut).trim() + "…", prefixPending);
                 prefixPending = false;
                 sent++;
@@ -743,15 +841,43 @@ public final class CubePilotCommands {
         }
     }
 
-    private static int findWrapPoint(String text, int maxLength) {
+    private static int findWrapPoint(String text, int maxLength, int maxWidth) {
         int limit = Math.min(maxLength, text.length());
-        for (int index = limit; index > Math.max(20, limit / 2); index--) {
-            char current = text.charAt(index - 1);
-            if (Character.isWhitespace(current) || "，。；：、！？.!?;:".indexOf(current) >= 0) {
-                return index;
+        int width = 0;
+        int preferred = -1;
+        for (int index = 0; index < text.length(); index++) {
+            width += charWidth(text.charAt(index));
+            if (Character.isWhitespace(text.charAt(index))
+                    || "，。；：、！？.!?;:）】》。".indexOf(text.charAt(index)) >= 0) {
+                preferred = index + 1;
+            }
+            if (index + 1 >= limit || width >= maxWidth) {
+                break;
             }
         }
-        return limit;
+        if (preferred > 8) {
+            return preferred;
+        }
+        return Math.max(1, Math.min(limit, firstSafeBreak(text, limit, maxWidth)));
+    }
+
+    private static int firstSafeBreak(String text, int limit, int maxWidth) {
+        int width = 0;
+        for (int index = 0; index < text.length() && index < limit; index++) {
+            width += charWidth(text.charAt(index));
+            if (width > maxWidth) return Math.max(1, index);
+        }
+        return Math.min(limit, text.length());
+    }
+
+    private static int displayWidth(String text) {
+        int width = 0;
+        for (int index = 0; index < text.length(); index++) width += charWidth(text.charAt(index));
+        return width;
+    }
+
+    private static int charWidth(char value) {
+        return value >= 0x2E80 ? 2 : 1;
     }
 
     private static String parseFailure(ParseResults<CommandSourceStack> parsed) {
@@ -760,6 +886,42 @@ public final class CubePilotCommands {
             return "命令语法错误：" + shortText(exception.getMessage(), 140);
         }
         return "命令语法未完整解析";
+    }
+
+    /** 将成功执行结果压缩为玩家可读的对象描述，避免把整段 NBT 再刷到聊天栏。 */
+    private static String readableCommand(String command) {
+        String clean = command == null ? "" : command.stripLeading().replaceFirst("^/", "");
+        String[] parts = clean.split("\\s+");
+        if (parts.length == 0 || parts[0].isBlank()) return "操作";
+        if (parts[0].equalsIgnoreCase("give") && parts.length >= 3) {
+            String item = parts[2].split("[\\[\\{]", 2)[0];
+            return "物品 " + item;
+        }
+        if (parts[0].equalsIgnoreCase("summon") && parts.length >= 2) {
+            return "生物 " + parts[1];
+        }
+        return parts[0] + " 操作";
+    }
+
+    private static void sendExecuted(CommandSourceStack source, String command) {
+        Component result = Component.literal("已执行：").withStyle(ChatFormatting.WHITE)
+                .append(Component.literal(readableCommand(command)).withStyle(ChatFormatting.AQUA)
+                        .withStyle(style -> style.withHoverEvent(new HoverEvent(
+                                HoverEvent.Action.SHOW_TEXT, Component.literal(command)))));
+        source.sendSuccess(() -> Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA).append(result), false);
+    }
+
+    private static String replySummary(AssistantReply reply) {
+        if (reply == null) return "";
+        return "answer=" + shortText(reply.answer(), 4000)
+                + ";commands=" + String.join(" | ", reply.commandSuggestions())
+                + ";clarification=" + reply.clarificationRequired();
+    }
+
+    private static String verificationSummary(CommandVerification verification) {
+        return "complete=" + verification.complete()
+                + ";missing=" + String.join(" | ", verification.missingRequirements())
+                + ";reason=" + verification.reason();
     }
 
     /** 使用当前服务器版本注册的原生命令参数解析器校验完整命令，覆盖该版本的物品 NBT/组件解析。 */
@@ -785,13 +947,14 @@ public final class CubePilotCommands {
 
     private static void send(CommandSourceStack source, String message) {
         source.sendSuccess(() -> Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA)
-                .append(Component.literal(message)), false);
+                .append(Component.literal(message).withStyle(ChatFormatting.WHITE)), false);
     }
 
     private static void sendReplyLine(CommandSourceStack source, String message, boolean includePrefix) {
         Component line = includePrefix
-                ? Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA).append(Component.literal(message))
-                : Component.literal(message);
+                ? Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA)
+                        .append(Component.literal(message).withStyle(ChatFormatting.WHITE))
+                : Component.literal(message).withStyle(ChatFormatting.WHITE);
         source.sendSuccess(() -> line, false);
     }
 

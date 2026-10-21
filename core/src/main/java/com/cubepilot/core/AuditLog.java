@@ -23,9 +23,11 @@ public final class AuditLog {
     private static final Pattern URL_CREDENTIALS = Pattern.compile("(?i)(https?://)[^/@\\s:]+:[^/@\\s]+@");
 
     private final Path path;
+    private final Path tracePath;
 
     public AuditLog(Path directory) {
         this.path = directory.resolve("audit.jsonl");
+        this.tracePath = directory.resolve("trace.jsonl");
     }
 
     public void record(String actor, String action, String detail) {
@@ -34,12 +36,28 @@ public final class AuditLog {
         row.addProperty("actor", safeField(actor, 128));
         row.addProperty("action", safeField(action, 128));
         row.addProperty("detail", safeField(detail, 2048));
+        write(path, row);
+    }
+
+    /** 记录一次请求链的输入输出摘要；不记录模型隐藏思维链，只记录可审计文本。 */
+    public void recordTrace(String requestId, String actor, String action, String input, String output) {
+        JsonObject row = new JsonObject();
+        row.addProperty("time", Instant.now().toString());
+        row.addProperty("request_id", safeField(requestId, 64));
+        row.addProperty("actor", safeField(actor, 128));
+        row.addProperty("action", safeField(action, 128));
+        row.addProperty("input", safeField(input, 12000));
+        row.addProperty("output", safeField(output, 12000));
+        write(tracePath, row);
+    }
+
+    private void write(Path target, JsonObject row) {
         synchronized (FILE_LOCK) {
             try {
-                ensureLogFile();
+                ensureLogFile(target);
                 byte[] encoded = (row + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
-                rotateIfNeeded(encoded.length);
-                Files.write(path, encoded, StandardOpenOption.APPEND, StandardOpenOption.WRITE,
+                rotateIfNeeded(target, encoded.length);
+                Files.write(target, encoded, StandardOpenOption.APPEND, StandardOpenOption.WRITE,
                         LinkOption.NOFOLLOW_LINKS);
             } catch (IOException exception) {
                 System.err.println("[CubePilot] 审计日志写入失败：" + exception.getClass().getSimpleName());
@@ -47,55 +65,57 @@ public final class AuditLog {
         }
     }
 
-    private void ensureLogFile() throws IOException {
-        Path directory = path.getParent();
+    private void ensureLogFile(Path target) throws IOException {
+        Path directory = target.getParent();
         if (directory == null || Files.isSymbolicLink(directory)
                 || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("审计日志目录无效");
         }
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.isSymbolicLink(target) || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("审计日志路径不是普通文件");
             }
             return;
         }
         try {
-            Files.createFile(path);
-            restrictFilePermissions(path);
+            Files.createFile(target);
+            restrictFilePermissions(target);
         } catch (java.nio.file.FileAlreadyExistsException ignored) {
-            if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.isSymbolicLink(target) || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("审计日志路径不是普通文件");
             }
         }
     }
 
-    private void rotateIfNeeded(int incomingBytes) throws IOException {
-        if (Files.size(path) + incomingBytes <= MAX_FILE_BYTES) {
+    private void rotateIfNeeded(Path target, int incomingBytes) throws IOException {
+        if (Files.size(target) + incomingBytes <= MAX_FILE_BYTES) {
             return;
         }
         for (int index = 1; index <= ARCHIVE_COUNT; index++) {
-            Path candidate = archive(index);
+            Path candidate = archive(target, index);
             if (Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)
                     && (Files.isSymbolicLink(candidate)
                             || !Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS))) {
                 throw new IOException("审计日志归档路径不是普通文件");
             }
         }
-        Path oldest = archive(ARCHIVE_COUNT);
+        Path oldest = archive(target, ARCHIVE_COUNT);
         Files.deleteIfExists(oldest);
         for (int index = ARCHIVE_COUNT - 1; index >= 1; index--) {
-            Path source = archive(index);
+            Path source = archive(target, index);
             if (Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
-                Files.move(source, archive(index + 1), StandardCopyOption.REPLACE_EXISTING);
+                Files.move(source, archive(target, index + 1), StandardCopyOption.REPLACE_EXISTING);
             }
         }
-        Files.move(path, archive(1), StandardCopyOption.REPLACE_EXISTING);
-        Files.createFile(path);
-        restrictFilePermissions(path);
+        Files.move(target, archive(target, 1), StandardCopyOption.REPLACE_EXISTING);
+        Files.createFile(target);
+        restrictFilePermissions(target);
     }
 
-    private Path archive(int index) {
-        return path.resolveSibling("audit." + index + ".jsonl");
+    private Path archive(Path target, int index) {
+        String name = target.getFileName().toString();
+        String base = name.endsWith(".jsonl") ? name.substring(0, name.length() - 6) : name;
+        return target.resolveSibling(base + "." + index + ".jsonl");
     }
 
     private static void restrictFilePermissions(Path file) throws IOException {
