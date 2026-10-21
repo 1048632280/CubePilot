@@ -26,7 +26,7 @@ public final class CubePilotFabricMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 CubePilotCommands.register(dispatcher, "Fabric", mods));
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, player, parameters) ->
-                !CubePilotCommands.onChatMessage(player.getServer(), player, message.getContent(),
+                !CubePilotCommands.onChatMessage(player.getServer(), player, message.signedContent(),
                         "Fabric", mods));
     }
 }
