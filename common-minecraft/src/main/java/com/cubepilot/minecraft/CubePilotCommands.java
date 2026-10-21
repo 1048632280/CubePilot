@@ -557,11 +557,9 @@ public final class CubePilotCommands {
                 continue;
             }
             String command = decision.command();
-            String raw = command.substring(1);
-            ParseResults<CommandSourceStack> parsed = source.getServer().getCommands()
-                    .getDispatcher().parse(raw, source);
-            if (parsed.getReader().canRead() || !parsed.getExceptions().isEmpty()) {
-                String reason = parseFailure(parsed);
+            ValidatedCommand validated = validateForRuntime(source, command);
+            if (!validated.valid()) {
+                String reason = validated.reason();
                 agent.audit().record(source.getTextName(), "command.rejected", reason);
                 if (rejectionReason == null) {
                     rejectionReason = reason;
@@ -571,7 +569,7 @@ public final class CubePilotCommands {
 
             if (decision.automatic()) {
                 try {
-                    int result = source.getServer().getCommands().getDispatcher().execute(parsed);
+                    int result = source.getServer().getCommands().getDispatcher().execute(validated.parsed());
                     agent.audit().record(source.getTextName(), "command.auto-executed",
                             "command=" + command + " result=" + result + " reason=" + decision.reason());
                     send(source, "已执行：" + shortText(command, 180));
@@ -723,6 +721,21 @@ public final class CubePilotCommands {
             return "命令语法错误：" + shortText(exception.getMessage(), 140);
         }
         return "命令语法未完整解析";
+    }
+
+    /** 使用当前服务器版本注册的原生命令参数解析器校验完整命令，覆盖该版本的物品 NBT/组件解析。 */
+    private static ValidatedCommand validateForRuntime(CommandSourceStack source, String command) {
+        ParseResults<CommandSourceStack> parsed = source.getServer().getCommands()
+                .getDispatcher().parse(command.substring(1), source);
+        if (parsed.getReader().canRead() || !parsed.getExceptions().isEmpty()) {
+            return new ValidatedCommand(null, false,
+                    "Minecraft " + SharedConstants.getCurrentVersion().getName() + " 命令参数校验失败："
+                            + parseFailure(parsed));
+        }
+        return new ValidatedCommand(parsed, true, "");
+    }
+
+    private record ValidatedCommand(ParseResults<CommandSourceStack> parsed, boolean valid, String reason) {
     }
 
     private static int fail(CommandSourceStack source, String message) {
