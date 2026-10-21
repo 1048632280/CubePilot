@@ -28,6 +28,7 @@ class CubePilotConfigTest {
         assertTrue(contents.contains("permanent-auto-deny"));
         assertTrue(contents.contains("0 = 关闭此项限制"));
         assertTrue(contents.contains("offer-add-to-auto-allow = true"));
+        assertTrue(contents.contains("streaming = false"));
 
         Files.writeString(configPath, "[api]\nendpoint = \"http://remote.example.invalid/v1\"\n");
         assertEquals(configPath, CubePilotConfig.ensureExists(serverRoot));
@@ -44,7 +45,9 @@ class CubePilotConfigTest {
                 .replace("    # \"time set day\",", "    \"time set day\",")
                 .replace("all-players-selector = 3", "all-players-selector = 1")
                 .replace("complex-nbt = 3", "complex-nbt = 2")
-                .replace("multiple-targets = 3", "multiple-targets = 0");
+                .replace("multiple-targets = 3", "multiple-targets = 0")
+                .replace("streaming = false", "streaming = true")
+                .replace("streaming-fallback = true", "streaming-fallback = false");
         Files.writeString(configPath, contents);
 
         CubePilotConfig config = CubePilotConfig.load(serverRoot);
@@ -56,6 +59,8 @@ class CubePilotConfigTest {
         assertEquals(1, config.safetyMode(CubePilotConfig.SafetyRule.ALL_PLAYERS_SELECTOR));
         assertEquals(2, config.safetyMode(CubePilotConfig.SafetyRule.COMPLEX_NBT));
         assertEquals(0, config.safetyMode(CubePilotConfig.SafetyRule.MULTIPLE_TARGETS));
+        assertTrue(config.streaming());
+        assertFalse(config.streamingFallback());
     }
 
     @Test

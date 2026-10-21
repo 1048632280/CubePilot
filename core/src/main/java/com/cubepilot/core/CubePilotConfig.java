@@ -37,6 +37,8 @@ public final class CubePilotConfig {
     private final String model;
     private final String apiKey;
     private final int timeoutSeconds;
+    private final boolean streaming;
+    private final boolean streamingFallback;
     private final int maxFileBytes;
     private final boolean offerAddToAutoAllow;
     private final CommandRules autoAllow;
@@ -49,6 +51,8 @@ public final class CubePilotConfig {
         this.model = stringValue(values, "api.model", DEFAULT_MODEL).trim();
         this.apiKey = stringValue(values, "api.key", "").trim();
         this.timeoutSeconds = boundedInt(values, "api.timeout-seconds", DEFAULT_TIMEOUT_SECONDS, 5, 120);
+        this.streaming = booleanValue(values, "api.streaming", false);
+        this.streamingFallback = booleanValue(values, "api.streaming-fallback", true);
         this.maxFileBytes = boundedInt(values, "files.max-bytes", DEFAULT_MAX_FILE_BYTES, 1024, 65536);
         this.offerAddToAutoAllow = booleanValue(values, "command.offer-add-to-auto-allow", true);
         this.autoAllow = commandRules(values, "command.auto-allow");
@@ -529,7 +533,11 @@ public final class CubePilotConfig {
                 + "# API Key。更推荐通过服务端进程的 CUBEPILOT_API_KEY 环境变量提供；环境变量优先。\n"
                 + "key = \"\"\n"
                 + "# 请求超时秒数，有效范围 5～120；超出范围会被限制到最近的边界值。\n"
-                + "timeout-seconds = 45\n\n"
+                + "timeout-seconds = 45\n"
+                + "# 是否启用 SSE 流式文字输出。仅用于纯文字回答；包含命令候选的请求会自动使用非流式。\n"
+                + "streaming = false\n"
+                + "# 流式接口不可用时是否自动回退为一次性请求。\n"
+                + "streaming-fallback = true\n\n"
                 + banner("2. 只读文件扫描")
                 + "[files]\n"
                 + "# 单个配置、日志或崩溃报告允许读取的最大字节数，有效范围 1024～65536。\n"
@@ -665,6 +673,8 @@ public final class CubePilotConfig {
     }
 
     public int timeoutSeconds() { return timeoutSeconds; }
+    public boolean streaming() { return streaming; }
+    public boolean streamingFallback() { return streamingFallback; }
     public int maxFileBytes() { return maxFileBytes; }
     public boolean offerAddToAutoAllow() { return offerAddToAutoAllow; }
     public CommandRules autoAllow() { return autoAllow; }

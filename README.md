@@ -40,6 +40,8 @@ Mod 首次启动生成的完整 TOML 带有逐项中文注释。默认自动白�
 
 配置自定义 API 地址时使用 HTTPS；只有回环地址（localhost、127.0.0.1、::1）可使用 HTTP。端点必须兼容 OpenAI Chat Completions API。
 
+`[api]` 中的 `streaming` 可开启 SSE 流式文字输出，流式内容只展示已确认的 `answer`，不会展示 JSON 标记或命令字段；命令候选始终等待完整响应后再进行安全检查。`streaming-fallback` 控制服务商不支持 SSE 时是否回退为普通请求。涉及命令处理的普通 `/cp` 请求默认保持非流式，避免在命令安全检查完成前展示不必要内容。
+
 ## 游戏内指令
 
 所有别名都需要 OP 2 级权限：

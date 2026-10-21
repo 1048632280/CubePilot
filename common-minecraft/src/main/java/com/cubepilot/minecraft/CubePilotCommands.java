@@ -5,6 +5,7 @@ import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
 import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
+import com.cubepilot.core.CubePilotTasks;
 import com.cubepilot.core.DiagnosticAnalyzer;
 import com.cubepilot.core.DiagnosticReport;
 import com.cubepilot.core.ModInfo;
@@ -250,11 +251,18 @@ public final class CubePilotCommands {
         CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
-            ServerSnapshot snapshot = snapshot(source.getServer(), loader, mods, agent.files());
-            agent.audit().record(source.getTextName(), "snapshot.capture",
-                    "settings=" + snapshot.serverSettings().size()
-                            + " files=" + snapshot.configurationFiles().size());
-            sendBoundedLines(source, snapshot.toPromptText(), 120, 240);
+            send(source, "正在后台生成只读服务器快照；不会阻塞服务器线程。");
+            snapshotAsync(source.getServer(), loader, mods, agent.files())
+                    .whenComplete((snapshot, error) -> source.getServer().execute(() -> {
+                        if (error != null) {
+                            send(source, "无法生成只读服务器快照：" + shortText(safeMessage(error), 160));
+                            return;
+                        }
+                        agent.audit().record(source.getTextName(), "snapshot.capture",
+                                "settings=" + snapshot.serverSettings().size()
+                                        + " files=" + snapshot.configurationFiles().size());
+                        sendBoundedLines(source, snapshot.toPromptText(), 120, 240);
+                    }));
             return 1;
         } catch (IOException | IllegalArgumentException exception) {
             return fail(source, "无法生成只读服务器快照：" + safeMessage(exception));
@@ -312,40 +320,72 @@ public final class CubePilotCommands {
     private static int inspect(CommandContext<CommandSourceStack> context, String loader,
             List<ModInfo> mods, String path, String question, String taskPrompt) {
         CommandSourceStack source = context.getSource();
+        CubePilotAgent agent;
         try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            String contents = agent.files().read(path);
-            DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
-            agent.audit().record(source.getTextName(), "file.inspect",
-                    "path=" + path + " category=" + report.category()
-                            + " severity=" + report.severity()
-                            + " findings=" + report.findings().size());
-            return ask(context, loader, mods, question,
-                    "本地只读规则诊断摘要：\n" + report.toText()
-                            + "\n\n文件路径：" + path + "\n文件内容（凭据已脱敏）：\n" + contents,
-                    taskPrompt, false);
+            agent = CubePilotAgent.get();
         } catch (IOException | IllegalArgumentException exception) {
             auditDenied(source, "file.inspect", path, exception);
             return fail(source, exception.getMessage());
         }
+        send(source, "正在后台读取并分析文件；不会阻塞服务器线程。");
+        CubePilotTasks.supplyAsync(() -> {
+            try {
+                String contents = agent.files().read(path);
+                DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
+                return new DiagnosticInput(contents, report);
+            } catch (IOException | IllegalArgumentException exception) {
+                throw new CompletionException(exception);
+            }
+        }).whenComplete((input, error) -> source.getServer().execute(() -> {
+            if (error != null) {
+                auditDenied(source, "file.inspect", path, error);
+                send(source, "文件分析失败：" + shortText(safeMessage(error), 160));
+                return;
+            }
+            DiagnosticReport report = input.report();
+            agent.audit().record(source.getTextName(), "file.inspect",
+                    "path=" + path + " category=" + report.category()
+                            + " severity=" + report.severity()
+                            + " findings=" + report.findings().size());
+            ask(context, loader, mods, question,
+                    "本地只读规则诊断摘要：\n" + report.toText()
+                            + "\n\n文件路径：" + path + "\n文件内容（凭据已脱敏）：\n" + input.contents(),
+                    taskPrompt, false);
+        }));
+        return 1;
     }
 
     private static int analyze(CommandContext<CommandSourceStack> context, String path) {
         CommandSourceStack source = context.getSource();
+        CubePilotAgent agent;
         try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            String contents = agent.files().read(path);
-            DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
+            agent = CubePilotAgent.get();
+        } catch (IOException | IllegalArgumentException exception) {
+            auditDenied(source, "file.analyze", path, exception);
+            return fail(source, exception.getMessage());
+        }
+        send(source, "正在后台分析文件；不会阻塞服务器线程。");
+        CubePilotTasks.supplyAsync(() -> {
+            try {
+                String contents = agent.files().read(path);
+                return new DiagnosticInput(contents, DiagnosticAnalyzer.analyze(path, contents));
+            } catch (IOException | IllegalArgumentException exception) {
+                throw new CompletionException(exception);
+            }
+        }).whenComplete((input, error) -> source.getServer().execute(() -> {
+            if (error != null) {
+                auditDenied(source, "file.analyze", path, error);
+                send(source, "文件分析失败：" + shortText(safeMessage(error), 160));
+                return;
+            }
+            DiagnosticReport report = input.report();
             agent.audit().record(source.getTextName(), "file.analyze",
                     "path=" + path + " category=" + report.category()
                             + " severity=" + report.severity()
                             + " findings=" + report.findings().size());
             sendBoundedLines(source, report.toText(), 80, 240);
-            return 1;
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "file.analyze", path, exception);
-            return fail(source, exception.getMessage());
-        }
+        }));
+        return 1;
     }
 
     private static int configRequest(CommandContext<CommandSourceStack> context, String loader,
@@ -363,22 +403,30 @@ public final class CubePilotCommands {
         CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
-            ServerSnapshot snapshot = snapshot(source.getServer(), loader, mods, agent.files());
             agent.audit().record(source.getTextName(), "config.auto-discover",
                     "question_length=" + question.length());
             send(source, "正在异步扫描全部白名单 Mod 配置，并交给模型判断；不会读取凭据或修改文件。");
-            CompletableFuture.supplyAsync(() -> {
+            boolean useStreaming = agent.config().streaming();
+            StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
+            snapshotAsync(source.getServer(), loader, mods, agent.files()).thenCompose(snapshot ->
+                CubePilotTasks.supplyAsync(() -> {
                 try {
                     return discoverAllConfigContext(agent.files(), mods, question);
                 } catch (IOException exception) {
                     throw new CompletionException(exception);
                 }
-            }).thenCompose(attachedContext -> {
+                }).thenCompose(attachedContext -> {
                 agent.audit().record(source.getTextName(), "config.scan.complete",
                         "context_length=" + attachedContext.length());
-                return agent.ask(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
-                        CONFIG_TASK_PROMPT);
-            }).whenComplete((reply, error) -> source.getServer().execute(() -> {
+                return useStreaming
+                        ? agent.askStreaming(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
+                                CONFIG_TASK_PROMPT, display::accept)
+                        : agent.ask(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
+                                CONFIG_TASK_PROMPT);
+                })).whenComplete((reply, error) -> source.getServer().execute(() -> {
+                if (display != null) {
+                    display.flush();
+                }
                 if (error != null) {
                     agent.audit().record(source.getTextName(), "config.request.error", safeMessage(error));
                     send(source, "配置分析失败：" + shortText(safeMessage(error), 160));
@@ -386,8 +434,8 @@ public final class CubePilotCommands {
                 }
                 agent.audit().record(source.getTextName(), "config.request.complete",
                         "answer_length=" + reply.answer().length());
-                renderReply(source, agent, reply, false);
-            }));
+                renderReply(source, agent, reply, false, display != null && display.hasSent());
+                }));
             return 1;
         } catch (IOException | IllegalArgumentException exception) {
             auditDenied(source, "config.auto-discover", question, exception);
@@ -558,29 +606,37 @@ public final class CubePilotCommands {
         } catch (IOException | IllegalArgumentException exception) {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
-        ServerSnapshot snapshot;
-        try {
-            snapshot = snapshot(source.getServer(), loader, mods, agent.files());
-        } catch (IOException | IllegalArgumentException exception) {
-            return fail(source, "无法生成服务器上下文：" + safeMessage(exception));
-        }
         agent.audit().record(source.getTextName(), "request.start", "question_length=" + question.length());
         send(source, "正在联系配置的 OpenAI 兼容 API；等待期间服务器线程不会被阻塞。");
-        agent.ask(question, attachedContext, snapshot, 16000, taskPrompt)
+        boolean useStreaming = !allowCommands && agent.config().streaming();
+        StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
+        snapshotAsync(source.getServer(), loader, mods, agent.files())
+                .thenCompose(snapshot -> useStreaming
+                        ? agent.askStreaming(question, attachedContext, snapshot, 16000, taskPrompt,
+                                display::accept)
+                        : agent.ask(question, attachedContext, snapshot, 16000, taskPrompt))
                 .whenComplete((reply, error) -> source.getServer().execute(() -> {
+            if (display != null) {
+                display.flush();
+            }
             if (error != null) {
                 agent.audit().record(source.getTextName(), "request.error", safeMessage(error));
                 send(source, "请求失败：" + shortText(safeMessage(error), 180));
                 return;
             }
             agent.audit().record(source.getTextName(), "request.complete", "answer_length=" + reply.answer().length());
-            renderReply(source, agent, reply, allowCommands);
+            renderReply(source, agent, reply, allowCommands, display != null && display.hasSent());
         }));
         return 1;
     }
 
     private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
             AssistantReply reply, boolean allowCommands) {
+        renderReply(source, agent, reply, allowCommands, false);
+    }
+
+    private static void renderReply(CommandSourceStack source, CubePilotAgent agent,
+            AssistantReply reply, boolean allowCommands, boolean answerAlreadySent) {
         if (!(source.getEntity() instanceof ServerPlayer player)
                 || source.getServer().getPlayerList().getPlayer(player.getUUID()) != player) {
             agent.audit().record(source.getTextName(), "request.response.discarded", "requesting player is offline");
@@ -591,7 +647,9 @@ public final class CubePilotCommands {
                 agent.audit().record(source.getTextName(), "command.rejected",
                         "read-only request returned command suggestions");
             }
-            sendCompactLines(source, reply.answer(), 8, 180);
+            if (!answerAlreadySent) {
+                sendCompactLines(source, reply.answer(), 8, 180);
+            }
             return;
         }
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
@@ -686,12 +744,21 @@ public final class CubePilotCommands {
                 Map.of(), List.of(), modTexts(mods));
     }
 
-    private static ServerSnapshot snapshot(MinecraftServer server, String loader, List<ModInfo> mods,
-            ReadOnlyFileAccess files) throws IOException {
+    private static CompletableFuture<ServerSnapshot> snapshotAsync(MinecraftServer server, String loader,
+            List<ModInfo> mods, ReadOnlyFileAccess files) {
         String difficulty = server.overworld().getDifficulty().getDisplayName().getString();
-        return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader, difficulty,
-                server.getPlayerList().getPlayerCount(), server.getPlayerList().isUsingWhitelist(),
-                files.readServerSettingsSnapshot(), files.configurationInventorySnapshot(), modTexts(mods));
+        int playerCount = server.getPlayerList().getPlayerCount();
+        boolean whitelist = server.getPlayerList().isUsingWhitelist();
+        List<String> modTexts = modTexts(mods);
+        return CubePilotTasks.supplyAsync(() -> {
+            try {
+                return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader,
+                        difficulty, playerCount, whitelist, files.readServerSettingsSnapshot(),
+                        files.configurationInventorySnapshot(), modTexts);
+            } catch (IOException exception) {
+                throw new CompletionException(exception);
+            }
+        });
     }
 
     private static List<String> modTexts(List<ModInfo> mods) {
@@ -779,7 +846,7 @@ public final class CubePilotCommands {
         source.sendSuccess(() -> Component.literal(PREFIX + message), false);
     }
 
-    private static void auditDenied(CommandSourceStack source, String action, String path, Exception error) {
+    private static void auditDenied(CommandSourceStack source, String action, String path, Throwable error) {
         try {
             CubePilotAgent.get().audit().record(source.getTextName(), action + ".denied",
                     "path=" + path + " error=" + safeMessage(error));
@@ -808,6 +875,80 @@ public final class CubePilotCommands {
         }
         String compact = text.replaceAll("[\\r\\n]+", " ").trim();
         return compact.length() <= maxLength ? compact : compact.substring(0, Math.max(1, maxLength - 1)) + "…";
+    }
+
+    private record DiagnosticInput(String contents, DiagnosticReport report) {
+    }
+
+    /** 在服务端线程分段发送已确认的 answer 文字，不展示原始 JSON。 */
+    private static final class StreamDisplay {
+        private final CommandSourceStack source;
+        private final StringBuilder pending = new StringBuilder();
+        private int totalCharacters;
+        private boolean truncated;
+        private boolean sent;
+
+        private StreamDisplay(CommandSourceStack source) {
+            this.source = source;
+        }
+
+        private void accept(String text) {
+            if (text == null || text.isEmpty()) return;
+            String chunk = null;
+            synchronized (this) {
+                if (truncated) return;
+                int remaining = 4000 - totalCharacters;
+                if (remaining <= 0) {
+                    pending.append("\n（流式回答过长，后续已省略）");
+                    truncated = true;
+                } else {
+                    String accepted = text.length() <= remaining ? text : text.substring(0, remaining);
+                    pending.append(accepted);
+                    totalCharacters += accepted.length();
+                    if (accepted.length() < text.length()) {
+                        pending.append("\n（流式回答过长，后续已省略）");
+                        truncated = true;
+                    }
+                }
+                if (pending.length() >= 120 || containsSentenceEnd(pending)) {
+                    chunk = takeChunk();
+                    sent = true;
+                }
+            }
+            if (chunk != null) {
+                String output = chunk;
+                source.getServer().execute(() -> sendCompactLines(source, output, 2, 180));
+            }
+        }
+
+        private void flush() {
+            String chunk;
+            synchronized (this) {
+                chunk = takeChunk();
+                if (chunk != null && !chunk.isBlank()) sent = true;
+            }
+            if (chunk != null && !chunk.isBlank()) {
+                sendCompactLines(source, chunk, 2, 180);
+            }
+        }
+
+        private synchronized boolean hasSent() {
+            return sent;
+        }
+
+        private String takeChunk() {
+            if (pending.isEmpty()) return null;
+            String chunk = pending.toString().trim();
+            pending.setLength(0);
+            return chunk.isEmpty() ? null : chunk;
+        }
+
+        private static boolean containsSentenceEnd(CharSequence text) {
+            for (int index = 0; index < text.length(); index++) {
+                if ("\n。！？.!?".indexOf(text.charAt(index)) >= 0) return true;
+            }
+            return false;
+        }
     }
 
     private record PendingAllow(String actor, String command, long expiresAtMillis, PendingStage stage) {

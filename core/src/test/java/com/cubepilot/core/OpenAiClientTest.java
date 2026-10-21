@@ -3,6 +3,8 @@ package com.cubepilot.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 
@@ -27,5 +29,18 @@ class OpenAiClientTest {
 
         assertEquals("AI 返回格式无效：未能解析 answer 或 command_suggestions，请重试",
                 exception.getCause().getMessage());
+    }
+
+    @Test
+    void streamingExtractorOnlyEmitsAnswerAndHidesJsonAndCommands() {
+        List<String> visible = new ArrayList<>();
+        OpenAiClient.AnswerExtractor extractor = new OpenAiClient.AnswerExtractor(visible::add);
+        extractor.accept("{\"an");
+        extractor.accept("swer\":\"第一段\\n第二");
+        extractor.accept("段\\\"\",\"command_suggestions\":[\"kill @a\"]}");
+
+        assertEquals("第一段\n第二段\"", String.join("", visible));
+        assertEquals(0, visible.stream().filter(text -> text.contains("kill") || text.contains("command_suggestions"))
+                .count());
     }
 }
