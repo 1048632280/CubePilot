@@ -564,13 +564,11 @@ public final class CubePilotCommands {
             return;
         }
         if (reply.clarificationRequired()) {
-            if (source.getEntity() instanceof ServerPlayer player) {
-                pruneExpiredClarifications();
-                PENDING_CLARIFICATIONS.put(player.getUUID(), new PendingClarification(
-                        requestQuestion, System.currentTimeMillis() + CLARIFICATION_TTL_MILLIS));
-                send(source, shortText(reply.answer(), 180));
-                send(source, "请用 /cp <补充信息> 继续；2 分钟内有效。未确认前不会生成或执行命令。");
-            }
+            pruneExpiredClarifications();
+            PENDING_CLARIFICATIONS.put(player.getUUID(), new PendingClarification(
+                    requestQuestion, System.currentTimeMillis() + CLARIFICATION_TTL_MILLIS));
+            send(source, shortText(reply.answer(), 180));
+            send(source, "请用 /cp <补充信息> 继续；2 分钟内有效。未确认前不会生成或执行命令。");
             return;
         }
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
