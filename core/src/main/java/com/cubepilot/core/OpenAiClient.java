@@ -193,7 +193,7 @@ public final class OpenAiClient {
             if (openingQuote < 0) {
                 int key = findAnswerKey();
                 if (key < 0) return;
-                int colon = raw.indexOf(':', key + 8);
+                int colon = raw.indexOf(":", key + 8);
                 if (colon < 0) return;
                 int quote = colon + 1;
                 while (quote < raw.length() && Character.isWhitespace(raw.charAt(quote))) quote++;
