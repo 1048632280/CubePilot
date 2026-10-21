@@ -39,6 +39,9 @@ public final class CubePilotConfig {
     private final int timeoutSeconds;
     private final boolean streaming;
     private final boolean streamingFallback;
+    private final boolean chatTriggerEnabled;
+    private final List<String> chatPrefixes;
+    private final int chatPermissionLevel;
     private final int maxFileBytes;
     private final boolean offerAddToAutoAllow;
     private final CommandRules autoAllow;
@@ -53,6 +56,10 @@ public final class CubePilotConfig {
         this.timeoutSeconds = boundedInt(values, "api.timeout-seconds", DEFAULT_TIMEOUT_SECONDS, 5, 120);
         this.streaming = booleanValue(values, "api.streaming", false);
         this.streamingFallback = booleanValue(values, "api.streaming-fallback", true);
+        this.chatTriggerEnabled = booleanValue(values, "automation.chat-trigger-enabled", false);
+        this.chatPrefixes = listValue(values, "automation.chat-prefixes").stream()
+                .map(String::trim).filter(prefix -> !prefix.isEmpty()).distinct().toList();
+        this.chatPermissionLevel = boundedInt(values, "automation.chat-permission-level", 2, 0, 4);
         this.maxFileBytes = boundedInt(values, "files.max-bytes", DEFAULT_MAX_FILE_BYTES, 1024, 65536);
         this.offerAddToAutoAllow = booleanValue(values, "command.offer-add-to-auto-allow", true);
         this.autoAllow = commandRules(values, "command.auto-allow");
@@ -538,19 +545,29 @@ public final class CubePilotConfig {
                 + "streaming = false\n"
                 + "# 流式接口不可用时是否自动回退为一次性请求。\n"
                 + "streaming-fallback = true\n\n"
-                + banner("2. 只读文件扫描")
+                + banner("2. 聊天前缀触发（默认关闭）")
+                + "[automation]\n"
+                + "# true：只有匹配下方前缀且达到权限等级的玩家消息才进入 AI 意图路由；普通聊天不会发送给模型。\n"
+                + "chat-trigger-enabled = false\n"
+                + "# 前缀数组，一行一个；匹配不区分大小写。前缀之后必须有问题文本。\n"
+                + "chat-prefixes = [\n"
+                + "    \"!ai\",\n"
+                + "]\n"
+                + "# 触发最低权限等级，0～4；2 表示 OP 2 级及以上。\n"
+                + "chat-permission-level = 2\n\n"
+                + banner("3. 只读文件扫描")
                 + "[files]\n"
                 + "# 单个配置、日志或崩溃报告允许读取的最大字节数，有效范围 1024～65536。\n"
                 + "# 此设置不会扩大目录白名单，CubePilot 自身配置和凭据仍禁止通过聊天读取。\n"
                 + "max-bytes = 16384\n\n"
-                + banner("3. 自动执行与白名单按钮")
+                + banner("4. 自动执行与白名单按钮")
                 + "[command]\n"
                 + "# true：未命中自动白名单、但具备自动执行资格时，同时显示“加入自动白名单”按钮。\n"
                 + "#       第一次点击只显示二次确认；确认后才写入当前完整命令并立即重载。\n"
                 + "# false：只输出可点击的手动建议，不显示或询问任何写入白名单的按钮。\n"
                 + "# 无论此项为何值，CubePilot 都不会拦截玩家自己输入的任何原版或 Mod 命令。\n"
                 + "offer-add-to-auto-allow = true\n\n"
-                + banner("4. 自动执行白名单")
+                + banner("5. 自动执行白名单")
                 + "# 只有命中下列任意数组，并通过永久禁令、可调整禁令、安全项、权限和语法检查的命令才会自动执行。\n"
                 + "# roots：一级命令数组。填写 \"time\" 会允许 time 下的全部二级及后续参数，请谨慎使用。\n"
                 + "# subcommands：二级命令数组。填写 \"time set\" 会允许 time set 后的全部参数。\n"
@@ -566,7 +583,7 @@ public final class CubePilotConfig {
                 + "exact = [\n"
                 + "    # \"time set day\",\n"
                 + "]\n\n"
-                + banner("5. 可调整的自动执行禁止名单")
+                + banner("6. 可调整的自动执行禁止名单")
                 + "# 命中此处任意规则的命令永远不会自动执行，即使它同时命中自动白名单。\n"
                 + "# 它仍可按第 7 节安全项的设置显示为手动建议，由玩家检查后自行回车。\n"
                 + "# roots、subcommands、exact 的匹配层级与上一节完全相同；默认不额外禁止。\n"
@@ -580,12 +597,12 @@ public final class CubePilotConfig {
                 + "exact = [\n"
                 + "    # \"gamerule keepInventory true\",\n"
                 + "]\n\n"
-                + banner("6. 内置永久禁止自动执行（只读说明）")
+                + banner("7. 内置永久禁止自动执行（只读说明）")
                 + "# 下列数组仅说明代码中的安全底线，不是可编辑配置项；修改或删除本注释不会解除限制。\n"
                 + "# 这些命令仍可能作为手动建议显示；CubePilot 不会拦截玩家自己输入的命令。\n"
                 + "# permanent-auto-deny = [\"stop\", \"op\", \"deop\", \"ban\", \"ban-ip\", \"pardon\", \"pardon-ip\", \"whitelist\", \"kick\", \"execute\", \"function\", \"schedule\", \"reload\", \"fill\", \"clone\", \"setblock\", \"summon\", \"kill\", \"data\", \"forceload\", \"publish\", \"transfer\", \"debug\", \"jfr\", \"perf\", \"place\", \"spreadplayers\", \"cp\", \"cpilot\", \"cpa\"]\n"
                 + "# 此外，包含命令方块等特殊管理物品或危险数据的 give 命令也不会自动执行。\n\n"
-                + banner("7. 自动与手动建议安全项")
+                + banner("8. 自动与手动建议安全项")
                 + "# 每个安全项独立配置，数值含义完全相同：\n"
                 + "# 0 = 关闭此项限制；自动执行和 CubePilot 手动建议都不因这一项被阻止。\n"
                 + "# 1 = 只禁止 AI 自动执行；仍可显示为点击后由玩家手动回车的建议。\n"
@@ -675,6 +692,9 @@ public final class CubePilotConfig {
     public int timeoutSeconds() { return timeoutSeconds; }
     public boolean streaming() { return streaming; }
     public boolean streamingFallback() { return streamingFallback; }
+    public boolean chatTriggerEnabled() { return chatTriggerEnabled; }
+    public List<String> chatPrefixes() { return chatPrefixes; }
+    public int chatPermissionLevel() { return chatPermissionLevel; }
     public int maxFileBytes() { return maxFileBytes; }
     public boolean offerAddToAutoAllow() { return offerAddToAutoAllow; }
     public CommandRules autoAllow() { return autoAllow; }

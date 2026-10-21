@@ -39,6 +39,8 @@ class CubePilotConfigTest {
     void loadsArraysSafetyModesAndButtonSwitch() throws IOException {
         Path configPath = CubePilotConfig.ensureExists(serverRoot);
         String contents = Files.readString(configPath)
+                .replace("chat-trigger-enabled = false", "chat-trigger-enabled = true")
+                .replace("chat-permission-level = 2", "chat-permission-level = 1")
                 .replace("offer-add-to-auto-allow = true", "offer-add-to-auto-allow = false")
                 .replace("    # \"time\",", "    \"time\",")
                 .replace("    # \"weather clear\",", "    \"weather clear\",")
@@ -61,6 +63,9 @@ class CubePilotConfigTest {
         assertEquals(0, config.safetyMode(CubePilotConfig.SafetyRule.MULTIPLE_TARGETS));
         assertTrue(config.streaming());
         assertFalse(config.streamingFallback());
+        assertTrue(config.chatTriggerEnabled());
+        assertEquals(1, config.chatPermissionLevel());
+        assertEquals(java.util.List.of("!ai"), config.chatPrefixes());
     }
 
     @Test

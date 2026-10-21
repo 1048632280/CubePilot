@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.util.List;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
@@ -31,5 +32,15 @@ public final class CubePilotForgeMod {
                 .sorted(java.util.Comparator.comparing(ModInfo::id))
                 .toList();
         CubePilotCommands.register(event.getDispatcher(), "Forge", mods);
+    }
+
+    @SubscribeEvent
+    public void onServerChat(ServerChatEvent event) {
+        if (CubePilotCommands.onChatMessage(event.getPlayer().getServer(), event.getPlayer(),
+                event.getRawText(), "Forge", ModList.get().getMods().stream()
+                        .map(mod -> new ModInfo(mod.getModId(), mod.getDisplayName(), mod.getVersion().toString()))
+                        .sorted(java.util.Comparator.comparing(ModInfo::id)).toList())) {
+            event.setCanceled(true);
+        }
     }
 }

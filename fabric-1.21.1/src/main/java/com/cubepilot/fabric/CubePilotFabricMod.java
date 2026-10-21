@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.util.List;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 
 public final class CubePilotFabricMod implements ModInitializer {
@@ -24,5 +25,8 @@ public final class CubePilotFabricMod implements ModInitializer {
                 .toList();
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 CubePilotCommands.register(dispatcher, "Fabric", mods));
+        ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, player, parameters) ->
+                !CubePilotCommands.onChatMessage(player.getServer(), player, message.getContent(),
+                        "Fabric", mods));
     }
 }

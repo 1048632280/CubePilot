@@ -10,6 +10,7 @@ import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.ServerChatEvent;
 
 @Mod(CubePilotNeoForgeMod.MOD_ID)
 public final class CubePilotNeoForgeMod {
@@ -31,5 +32,15 @@ public final class CubePilotNeoForgeMod {
                 .sorted(java.util.Comparator.comparing(ModInfo::id))
                 .toList();
         CubePilotCommands.register(event.getDispatcher(), "NeoForge", mods);
+    }
+
+    @SubscribeEvent
+    public void onServerChat(ServerChatEvent event) {
+        if (CubePilotCommands.onChatMessage(event.getPlayer().getServer(), event.getPlayer(),
+                event.getRawText(), "NeoForge", ModList.get().getMods().stream()
+                        .map(mod -> new ModInfo(mod.getModId(), mod.getDisplayName(), mod.getVersion().toString()))
+                        .sorted(java.util.Comparator.comparing(ModInfo::id)).toList())) {
+            event.setCanceled(true);
+        }
     }
 }

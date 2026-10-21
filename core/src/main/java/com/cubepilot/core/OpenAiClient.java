@@ -38,6 +38,14 @@ public final class OpenAiClient {
         }
     }
 
+    public CompletableFuture<AgentIntent> classify(String question) {
+        String system = "你是 CubePilot 请求路由器。只输出 JSON：{\"intent\":\"ASK|CONFIG|ANALYZE|COMMAND\"}。"
+                + "CONFIG 仅用于查找 Mod 配置，ANALYZE 用于日志、崩溃报告或配置诊断，COMMAND 用于生成 Minecraft 指令或物品 NBT，"
+                + "其他问题使用 ASK。不要输出 Markdown。";
+        String user = "管理员请求：\n" + (question == null ? "" : question);
+        return sendNormal(system, user, 48).thenApply(response -> parseIntent(response.body()));
+    }
+
     /**
      * 请求 SSE 流式响应。回调只接收 answer 字段的文字增量，绝不接收命令字段或 JSON 标记。
      */
@@ -60,9 +68,14 @@ public final class OpenAiClient {
     }
 
     private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt) {
+        return sendNormal(systemPrompt, userPrompt, 900);
+    }
+
+    private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt,
+            int maxTokens) {
         HttpRequest request;
         try {
-            request = buildRequest(systemPrompt, userPrompt, false);
+            request = buildRequest(systemPrompt, userPrompt, false, maxTokens);
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
@@ -78,7 +91,7 @@ public final class OpenAiClient {
     private CompletableFuture<StringResponse> sendStreaming(String systemPrompt, String userPrompt) {
         HttpRequest request;
         try {
-            request = buildRequest(systemPrompt, userPrompt, true);
+            request = buildRequest(systemPrompt, userPrompt, true, 900);
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
@@ -86,7 +99,7 @@ public final class OpenAiClient {
                 .thenApply(response -> new StringResponse(response.statusCode(), response.body()));
     }
 
-    private HttpRequest buildRequest(String systemPrompt, String userPrompt, boolean streaming) {
+    private HttpRequest buildRequest(String systemPrompt, String userPrompt, boolean streaming, int maxTokens) {
         String key = config.apiKey();
         if (key.isBlank()) {
             throw new IllegalStateException(
@@ -96,7 +109,7 @@ public final class OpenAiClient {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", config.model());
         payload.addProperty("temperature", 0.2);
-        payload.addProperty("max_tokens", 900);
+        payload.addProperty("max_tokens", Math.max(16, Math.min(maxTokens, 4096)));
         payload.addProperty("stream", streaming);
         JsonArray messages = new JsonArray();
         messages.add(message("system", systemPrompt));
@@ -115,6 +128,38 @@ public final class OpenAiClient {
 
     private static IOException httpError(int statusCode) {
         return new IOException("模型接口返回 HTTP " + statusCode + "；请检查地址、模型名和服务端日志");
+    }
+
+    static AgentIntent parseIntent(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices == null || choices.isEmpty()) {
+                throw new IllegalArgumentException("choices 为空");
+            }
+            JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
+            if (message == null || !message.has("content") || !message.get("content").isJsonPrimitive()) {
+                throw new IllegalArgumentException("message.content 缺失");
+            }
+            String content = message.get("content").getAsString();
+            String json = extractJsonObject(content);
+            JsonElement intentElement = JsonParser.parseString(json).getAsJsonObject().get("intent");
+            if (intentElement == null || !intentElement.isJsonPrimitive()
+                    || !intentElement.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("intent 缺失或类型无效");
+            }
+            String intentName = intentElement.getAsString().trim();
+            return switch (intentName.toUpperCase(java.util.Locale.ROOT)) {
+                case "ASK" -> AgentIntent.ASK;
+                case "CONFIG" -> AgentIntent.CONFIG;
+                case "ANALYZE" -> AgentIntent.ANALYZE;
+                case "COMMAND" -> AgentIntent.COMMAND;
+                default -> throw new IllegalArgumentException("intent 不受支持");
+            };
+        } catch (RuntimeException exception) {
+            throw new java.util.concurrent.CompletionException(
+                    new IOException("模型请求分类响应格式无效，请重试", exception));
+        }
     }
 
     private static AssistantReply readStreamingResponse(InputStream input, Consumer<String> answerConsumer) {

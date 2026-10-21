@@ -1,13 +1,12 @@
 package com.cubepilot.minecraft;
 
 import com.cubepilot.core.AssistantReply;
+import com.cubepilot.core.AgentIntent;
 import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
 import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.CubePilotTasks;
-import com.cubepilot.core.DiagnosticAnalyzer;
-import com.cubepilot.core.DiagnosticReport;
 import com.cubepilot.core.ModInfo;
 import com.cubepilot.core.ReadOnlyFileAccess;
 import com.cubepilot.core.ServerSnapshot;
@@ -26,6 +25,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import net.minecraft.ChatFormatting;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandSourceStack;
@@ -41,14 +41,13 @@ public final class CubePilotCommands {
     private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
     private static final long ALLOW_CONFIRM_TTL_MILLIS = 120_000L;
     private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
+    private static final Map<UUID, Long> CHAT_COOLDOWNS = new ConcurrentHashMap<>();
     private static final String ASK_TASK_PROMPT =
             "任务：简短回答百科或服务器问题。只给最终结论；需要命令时只给必要命令，不解释执行过程。";
     private static final String CONFIG_TASK_PROMPT =
             "任务：只读定位 Mod 配置。自行从扫描证据识别 Mod；answer 分段输出，每项依次写 Mod、文件路径、行号/键、当前值、手工改法。最多 8 行，每行不超过 160 字；证据不足就只说未找到。不要输出命令。";
-    private static final String INSPECT_TASK_PROMPT =
-            "任务：只读分析指定文件。answer 只写结论、最多 3 条证据和 1 条建议；最多 6 行，每行不超过 160 字。不要输出思考过程。";
-    private static final String DIAGNOSE_TASK_PROMPT =
-            "任务：只读诊断指定文件。按‘结论；证据；建议’分段，最多 6 行，每行不超过 160 字；不确定时明确写不确定。";
+    private static final String ANALYZE_TASK_PROMPT =
+            "任务：只读诊断日志、崩溃报告或配置。按‘结论；证据；建议’分段，最多 6 行，每行不超过 160 字；不确定时明确写不确定。不要输出命令。";
 
     private CubePilotCommands() {
     }
@@ -60,6 +59,45 @@ public final class CubePilotCommands {
         }
     }
 
+    /** 匹配并处理已配置的聊天 AI 前缀时返回 true。 */
+    public static boolean onChatMessage(MinecraftServer server, ServerPlayer player, String message,
+            String loader, List<ModInfo> mods) {
+        if (message == null || message.isBlank()) return false;
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            if (!agent.config().chatTriggerEnabled()) return false;
+            if (!player.createCommandSourceStack().hasPermission(agent.config().chatPermissionLevel())) return false;
+            String normalized = message.stripLeading();
+            String prefix = agent.config().chatPrefixes().stream()
+                    .filter(candidate -> normalized.regionMatches(true, 0, candidate, 0, candidate.length()))
+                    .max(java.util.Comparator.comparingInt(String::length)).orElse(null);
+            if (prefix == null) return false;
+            String question = normalized.substring(prefix.length()).trim();
+            if (question.isBlank()) {
+                server.execute(() -> send(player.createCommandSourceStack(), "请在前缀后输入问题。"));
+                return true;
+            }
+            if (question.length() > 4000) {
+                server.execute(() -> send(player.createCommandSourceStack(), "问题过长，请控制在 4000 个字符以内。"));
+                return true;
+            }
+            long now = System.currentTimeMillis();
+            CHAT_COOLDOWNS.entrySet().removeIf(entry -> now - entry.getValue() >= TimeUnit.MINUTES.toMillis(10));
+            long previous = CHAT_COOLDOWNS.getOrDefault(player.getUUID(), 0L);
+            if (now - previous < TimeUnit.SECONDS.toMillis(8)) {
+                server.execute(() -> send(player.createCommandSourceStack(), "请求太频繁，请稍后再试。"));
+                return true;
+            }
+            CHAT_COOLDOWNS.put(player.getUUID(), now);
+            server.execute(() -> {
+                route(player.createCommandSourceStack(), loader, mods, question, "");
+            });
+            return true;
+        } catch (IOException | IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
     private static LiteralArgumentBuilder<CommandSourceStack> createRoot(String root,
             String loader, List<ModInfo> mods) {
         return Commands.literal(root)
@@ -67,8 +105,6 @@ public final class CubePilotCommands {
                 .executes(context -> help(context.getSource()))
                 .then(Commands.literal("help").executes(context -> help(context.getSource())))
                 .then(Commands.literal("status").executes(context -> status(context, loader, mods)))
-                .then(Commands.literal("snapshot").executes(context -> showSnapshot(context, loader, mods)))
-                .then(Commands.literal("mods").executes(context -> showMods(context, mods)))
                 .then(Commands.literal("reload").executes(CubePilotCommands::reload))
                 .then(Commands.literal("allow")
                         .then(Commands.literal("add")
@@ -79,55 +115,30 @@ public final class CubePilotCommands {
                                 .then(Commands.argument("token", StringArgumentType.word())
                                         .executes(context -> confirmAllow(context,
                                                 StringArgumentType.getString(context, "token"))))))
-                .then(Commands.literal("files")
-                        .executes(context -> listFiles(context, ""))
-                        .then(Commands.argument("path", StringArgumentType.greedyString())
-                                .executes(context -> listFiles(context,
-                                        StringArgumentType.getString(context, "path")))))
-                .then(Commands.literal("read")
-                        .then(Commands.argument("path", StringArgumentType.greedyString())
-                                .executes(context -> readFile(context,
-                                        StringArgumentType.getString(context, "path")))))
                 .then(Commands.literal("analyze")
-                        .then(Commands.argument("path", StringArgumentType.word())
-                                .executes(context -> analyze(context,
-                                        StringArgumentType.getString(context, "path")))))
+                        .then(Commands.argument("question", StringArgumentType.greedyString())
+                                .executes(context -> analyzeRequest(context.getSource(), loader, mods,
+                                        StringArgumentType.getString(context, "question")))))
                 .then(Commands.literal("config")
                         .then(Commands.argument("request", StringArgumentType.greedyString())
-                                .executes(context -> configRequest(context, loader, mods,
+                                .executes(context -> configRequest(context.getSource(), loader, mods,
                                         StringArgumentType.getString(context, "request")))))
-                .then(Commands.literal("inspect")
-                        .then(Commands.argument("path", StringArgumentType.word())
-                                .executes(context -> inspect(context, loader, mods,
-                                        StringArgumentType.getString(context, "path"),
-                                        "请读取并解释这个服务端文件，指出异常或值得注意的设置。",
-                                        INSPECT_TASK_PROMPT))))
-                .then(Commands.literal("diagnose")
-                        .then(Commands.argument("path", StringArgumentType.word())
-                                .then(Commands.argument("question", StringArgumentType.greedyString())
-                                        .executes(context -> inspect(context, loader, mods,
-                                                StringArgumentType.getString(context, "path"),
-                                                StringArgumentType.getString(context, "question"),
-                                                DIAGNOSE_TASK_PROMPT)))))
                 .then(Commands.literal("ask")
                         .then(Commands.argument("question", StringArgumentType.greedyString())
-                                .executes(context -> ask(context, loader, mods,
+                                .executes(context -> route(context.getSource(), loader, mods,
                                         StringArgumentType.getString(context, "question"), ""))))
                 .then(Commands.argument("question", StringArgumentType.greedyString())
-                        .executes(context -> ask(context, loader, mods,
+                        .executes(context -> route(context.getSource(), loader, mods,
                                 StringArgumentType.getString(context, "question"), "")));
     }
 
     private static int help(CommandSourceStack source) {
         send(source, "命令别名：/cp、/cpilot、/cpa（需要 OP 2 级权限）");
-        send(source, "/cp <问题> 或 /cp ask <问题>：查询百科/服务器状态并生成命令建议");
-        send(source, "/cp status | mods：查看简要服务器状态或已加载 Mod");
+        send(source, "/cp <问题> 或 /cp ask <问题>：自动识别问答、配置、诊断或命令请求");
+        send(source, "/cp status：查看服务器基本状态");
         send(source, "/cp reload：重新读取 CubePilot 自身 cubepilot.toml，不调用 API");
-        send(source, "/cp snapshot：查看运行时状态、安全设置和只读文件路径清单");
-        send(source, "/cp files [目录]：列出只读白名单文件；/cp read <相对路径>：读取并脱敏");
-        send(source, "/cp analyze <路径>：离线规则分析日志、崩溃报告或配置，不调用 API");
+        send(source, "/cp analyze <问题>：自动检索相关日志、崩溃报告或配置并诊断");
         send(source, "/cp config <自然语言问题>：自动识别 Mod，扫描只读配置并回答当前值与手工修改方法");
-        send(source, "/cp inspect <路径>：让 AI 分析白名单文件；/cp diagnose <路径> <问题>：分析指定日志/配置");
         send(source, "命令命中自动白名单且通过全部安全检查时会执行；其他允许显示的建议需点击后手动回车。");
         return 1;
     }
@@ -246,161 +257,107 @@ public final class CubePilotCommands {
         return source.getEntity() == null ? "" : source.getEntity().getUUID().toString();
     }
 
-    private static int showSnapshot(CommandContext<CommandSourceStack> context,
-            String loader, List<ModInfo> mods) {
-        CommandSourceStack source = context.getSource();
-        try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            send(source, "正在后台生成只读服务器快照；不会阻塞服务器线程。");
-            snapshotAsync(source.getServer(), loader, mods, agent.files())
-                    .whenComplete((snapshot, error) -> source.getServer().execute(() -> {
-                        if (error != null) {
-                            send(source, "无法生成只读服务器快照：" + shortText(safeMessage(error), 160));
-                            return;
-                        }
-                        agent.audit().record(source.getTextName(), "snapshot.capture",
-                                "settings=" + snapshot.serverSettings().size()
-                                        + " files=" + snapshot.configurationFiles().size());
-                        sendBoundedLines(source, snapshot.toPromptText(), 120, 240);
-                    }));
-            return 1;
-        } catch (IOException | IllegalArgumentException exception) {
-            return fail(source, "无法生成只读服务器快照：" + safeMessage(exception));
+    private static int analyzeRequest(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question) {
+        String request = question == null ? "" : question.trim();
+        if (request.isBlank() || request.length() > 4000) {
+            return fail(source, "诊断问题不能为空且长度不能超过 4000 个字符。");
         }
-    }
-
-    private static int showMods(CommandContext<CommandSourceStack> context, List<ModInfo> mods) {
-        send(context.getSource(), "已加载 Mod（" + mods.size() + " 个）：");
-        List<String> visible = mods.stream().limit(200).map(ModInfo::displayText).toList();
-        for (int start = 0; start < visible.size(); start += 12) {
-            send(context.getSource(), String.join(", ", visible.subList(start, Math.min(start + 12, visible.size()))));
-        }
-        if (mods.size() > visible.size()) {
-            send(context.getSource(), "另有 " + (mods.size() - visible.size()) + " 个 Mod 未显示。");
-        }
-        send(context.getSource(), "仅支持 Fabric/Forge/NeoForge 原生服务器；Bukkit/Paper 插件不在支持范围内。");
-        return 1;
-    }
-
-    private static int listFiles(CommandContext<CommandSourceStack> context, String path) {
-        CommandSourceStack source = context.getSource();
-        try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            List<String> entries = agent.files().list(path);
-            agent.audit().record(source.getTextName(), "file.list", path.isBlank() ? "." : path);
-            send(source, "只读文件列表：" + (path.isBlank() ? "." : path));
-            if (entries.isEmpty()) {
-                send(source, "没有可显示的文件或子目录。");
-            }
-            for (int start = 0; start < entries.size(); start += 8) {
-                send(source, String.join(" | ", entries.subList(start, Math.min(start + 8, entries.size()))));
-            }
-            return 1;
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "file.list", path, exception);
-            return fail(source, exception.getMessage());
-        }
-    }
-
-    private static int readFile(CommandContext<CommandSourceStack> context, String path) {
-        CommandSourceStack source = context.getSource();
-        try {
-            CubePilotAgent agent = CubePilotAgent.get();
-            String contents = agent.files().read(path);
-            agent.audit().record(source.getTextName(), "file.read", path);
-            send(source, "只读文件内容（已做常见凭据脱敏）：" + path);
-            sendBoundedLines(source, contents, 40, 240);
-            return 1;
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "file.read", path, exception);
-            return fail(source, exception.getMessage());
-        }
-    }
-
-    private static int inspect(CommandContext<CommandSourceStack> context, String loader,
-            List<ModInfo> mods, String path, String question, String taskPrompt) {
-        CommandSourceStack source = context.getSource();
         CubePilotAgent agent;
         try {
             agent = CubePilotAgent.get();
         } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "file.inspect", path, exception);
+            auditDenied(source, "file.analyze", request, exception);
             return fail(source, exception.getMessage());
         }
-        send(source, "正在后台读取并分析文件；不会阻塞服务器线程。");
+        send(source, "正在后台检索相关日志、崩溃报告和配置；不会阻塞服务器线程。");
+        CompletableFuture<ServerSnapshot> snapshot = snapshotAsync(
+                source.getServer(), loader, mods, agent.files());
         CubePilotTasks.supplyAsync(() -> {
             try {
-                String contents = agent.files().read(path);
-                DiagnosticReport report = DiagnosticAnalyzer.analyze(path, contents);
-                return new DiagnosticInput(contents, report);
+                return discoverAnalysisContext(agent.files(), request);
             } catch (IOException | IllegalArgumentException exception) {
                 throw new CompletionException(exception);
             }
-        }).whenComplete((input, error) -> source.getServer().execute(() -> {
+        }).thenCombine(snapshot, AnalysisContext::new)
+                .thenCompose(context -> agent.ask(request, context.text(), context.snapshot(), 44000,
+                        ANALYZE_TASK_PROMPT))
+                .whenComplete((reply, error) -> source.getServer().execute(() -> {
             if (error != null) {
-                auditDenied(source, "file.inspect", path, error);
-                send(source, "文件分析失败：" + shortText(safeMessage(error), 160));
+                auditDenied(source, "file.analyze", request, error);
+                send(source, "诊断失败：" + shortText(safeMessage(error), 160));
                 return;
             }
-            DiagnosticReport report = input.report();
-            agent.audit().record(source.getTextName(), "file.inspect",
-                    "path=" + path + " category=" + report.category()
-                            + " severity=" + report.severity()
-                            + " findings=" + report.findings().size());
-            ask(context, loader, mods, question,
-                    "本地只读规则诊断摘要：\n" + report.toText()
-                            + "\n\n文件路径：" + path + "\n文件内容（凭据已脱敏）：\n" + input.contents(),
-                    taskPrompt, false);
+            agent.audit().record(source.getTextName(), "file.analyze", "question_length=" + request.length());
+            renderReply(source, agent, reply, false);
         }));
         return 1;
     }
 
-    private static int analyze(CommandContext<CommandSourceStack> context, String path) {
-        CommandSourceStack source = context.getSource();
-        CubePilotAgent agent;
-        try {
-            agent = CubePilotAgent.get();
-        } catch (IOException | IllegalArgumentException exception) {
-            auditDenied(source, "file.analyze", path, exception);
-            return fail(source, exception.getMessage());
-        }
-        send(source, "正在后台分析文件；不会阻塞服务器线程。");
-        CubePilotTasks.supplyAsync(() -> {
-            try {
-                String contents = agent.files().read(path);
-                return new DiagnosticInput(contents, DiagnosticAnalyzer.analyze(path, contents));
-            } catch (IOException | IllegalArgumentException exception) {
-                throw new CompletionException(exception);
-            }
-        }).whenComplete((input, error) -> source.getServer().execute(() -> {
-            if (error != null) {
-                auditDenied(source, "file.analyze", path, error);
-                send(source, "文件分析失败：" + shortText(safeMessage(error), 160));
-                return;
-            }
-            DiagnosticReport report = input.report();
-            agent.audit().record(source.getTextName(), "file.analyze",
-                    "path=" + path + " category=" + report.category()
-                            + " severity=" + report.severity()
-                            + " findings=" + report.findings().size());
-            sendBoundedLines(source, report.toText(), 80, 240);
-        }));
-        return 1;
+    private record AnalysisContext(String text, ServerSnapshot snapshot) {
     }
 
-    private static int configRequest(CommandContext<CommandSourceStack> context, String loader,
+    private static String discoverAnalysisContext(ReadOnlyFileAccess files, String question) throws IOException {
+        StringBuilder context = new StringBuilder("服务端问题诊断上下文（只读）：\n用户问题：")
+                .append(question).append("\n可供模型自行判断的文件：\n");
+        List<String> paths = files.configurationInventorySnapshot();
+        for (String path : paths) {
+            if (!(path.startsWith("logs/") || path.startsWith("crash-reports/")
+                    || path.startsWith("config/") || path.startsWith("defaultconfigs/")
+                    || path.startsWith("world/serverconfig/"))) {
+                continue;
+            }
+            context.append("\n文件：").append(path).append('\n');
+            try {
+                String contents = files.read(path);
+                context.append(contents, 0, Math.min(contents.length(), 3500)).append('\n');
+            } catch (IOException exception) {
+                context.append("读取失败：").append(safeMessage(exception)).append('\n');
+            }
+            if (context.length() >= 42000) break;
+        }
+        context.append("\n请自行选择与问题最相关的文件；用户提供的路径仅作为参考，不得编造证据。\n");
+        return context.toString();
+    }
+
+    private static int configRequest(CommandSourceStack source, String loader,
             List<ModInfo> mods, String request) {
-        CommandSourceStack source = context.getSource();
         String question = request == null ? "" : request.trim();
         if (question.isBlank() || question.length() > 4000) {
             return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
         }
-        return askDiscoveredModConfig(context, loader, mods, question);
+        return askDiscoveredModConfig(source, loader, mods, question);
     }
 
-    private static int askDiscoveredModConfig(CommandContext<CommandSourceStack> context, String loader,
+    private static int route(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, String attachedContext) {
+        if (question == null || question.isBlank() || question.length() > 4000) {
+            return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
+        }
+        try {
+            CubePilotAgent agent = CubePilotAgent.get();
+            send(source, "正在识别请求类型；普通聊天不会触发此流程。");
+            agent.classify(question).whenComplete((intent, error) -> source.getServer().execute(() -> {
+                if (error != null) {
+                    agent.audit().record(source.getTextName(), "request.route.error", safeMessage(error));
+                    send(source, "请求类型识别失败：" + shortText(safeMessage(error), 160));
+                    return;
+                }
+                AgentIntent selected = intent == null ? AgentIntent.ASK : intent;
+                switch (selected) {
+                    case CONFIG -> configRequest(source, loader, mods, question);
+                    case ANALYZE -> analyzeRequest(source, loader, mods, question);
+                    case ASK, COMMAND -> askDirect(source, loader, mods, question, attachedContext);
+                }
+            }));
+            return 1;
+        } catch (IOException | IllegalArgumentException exception) {
+            return fail(source, "无法识别请求类型：" + safeMessage(exception));
+        }
+    }
+
+    private static int askDiscoveredModConfig(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question) {
-        CommandSourceStack source = context.getSource();
         try {
             CubePilotAgent agent = CubePilotAgent.get();
             agent.audit().record(source.getTextName(), "config.auto-discover",
@@ -443,74 +400,6 @@ public final class CubePilotCommands {
         }
     }
 
-    /* 已由无关键词的广泛扫描替代。
-    private static String discoverConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
-            String question) throws IOException {
-        List<ConfigCandidate> candidates = new ArrayList<>();
-        for (ModInfo mod : mods) {
-            if (!mod.isValidId()) {
-                continue;
-            }
-            List<String> paths = files.findModConfigurationFiles(mod.id(), mod.name());
-            for (String path : paths) {
-                try {
-                    String contents = files.read(path);
-                    ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
-                    int score = (mod.matches(question) ? 1000 : 0)
-                            + relevance(question, path, document);
-                    candidates.add(new ConfigCandidate(mod, path, document, contents, score));
-                } catch (IOException ignored) {
-                    // 单个文件不可读时继续尝试其他候选，不扩大白名单范围。
-                }
-            }
-        }
-
-        candidates.sort(Comparator.comparingInt(ConfigCandidate::score).reversed()
-                .thenComparing(ConfigCandidate::path));
-        if (candidates.isEmpty()) {
-            List<String> fallbackPaths = files.searchConfigurationFiles(question, 8);
-            if (fallbackPaths.isEmpty()) {
-                fallbackPaths = files.configurationInventorySnapshot().stream()
-                        .filter(path -> path.startsWith("config/") || path.startsWith("defaultconfigs/")
-                                || path.startsWith("world/serverconfig/"))
-                        .limit(12).toList();
-            }
-            for (String path : fallbackPaths) {
-                String contents = files.read(path);
-                ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
-                candidates.add(new ConfigCandidate(null, path, document, contents,
-                        relevance(question, path, document)));
-            }
-        }
-
-        StringBuilder context = new StringBuilder("自然语言配置自动检索上下文（只读）：\n")
-                .append("用户问题：").append(question)
-                .append("\n已加载 Mod 候选（ID / 显示名 / 版本）：\n");
-        mods.stream().limit(160).forEach(mod -> context.append("- ").append(mod.displayText()).append('\n'));
-        if (candidates.isEmpty()) {
-            context.append("未从允许目录找到明显匹配的配置文件。请明确说明未找到证据，不能编造路径或键名。\n");
-            return context.toString();
-        }
-        context.append("\n按 Mod 名称、文件名、配置键和值排序的候选文件（最多 6 个）：\n");
-        for (ConfigCandidate candidate : candidates.stream().limit(6).toList()) {
-            if (candidate.mod() != null) {
-                context.append("候选 Mod：").append(candidate.mod().displayText()).append('\n');
-            }
-            context.append(candidate.document().toSummary()).append('\n');
-            context.append("脱敏原文（用于核对行和值，只读）：\n");
-            int remaining = 18000 - context.length();
-            if (remaining <= 0) {
-                break;
-            }
-            context.append(candidate.contents(), 0, Math.min(candidate.contents().length(),
-                    Math.min(6000, remaining))).append('\n');
-        }
-        context.append("请只根据这些证据回答：准确指出 Mod、文件路径、键路径和当前值；"
-                + "给出手工修改示例和重启/备份提醒；没有证据时明确说未找到。\n");
-        return context.toString();
-    }
-
-    */
     private static String discoverAllConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
             String question) throws IOException {
         List<String> paths = files.configurationFilesSnapshot();
@@ -583,20 +472,19 @@ public final class CubePilotCommands {
         }
     }
 
-    private static int ask(CommandContext<CommandSourceStack> context, String loader,
+    private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext) {
-        return ask(context, loader, mods, question, attachedContext, ASK_TASK_PROMPT, true);
+        return askDirect(source, loader, mods, question, attachedContext, ASK_TASK_PROMPT, true);
     }
 
-    private static int ask(CommandContext<CommandSourceStack> context, String loader,
+    private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext, String taskPrompt) {
-        return ask(context, loader, mods, question, attachedContext, taskPrompt, true);
+        return askDirect(source, loader, mods, question, attachedContext, taskPrompt, true);
     }
 
-    private static int ask(CommandContext<CommandSourceStack> context, String loader,
+    private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext,
             String taskPrompt, boolean allowCommands) {
-        CommandSourceStack source = context.getSource();
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
         }
@@ -875,9 +763,6 @@ public final class CubePilotCommands {
         }
         String compact = text.replaceAll("[\\r\\n]+", " ").trim();
         return compact.length() <= maxLength ? compact : compact.substring(0, Math.max(1, maxLength - 1)) + "…";
-    }
-
-    private record DiagnosticInput(String contents, DiagnosticReport report) {
     }
 
     /** 在服务端线程分段发送已确认的 answer 文字，不展示原始 JSON。 */
