@@ -14,10 +14,19 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.function.Consumer;
 import java.util.concurrent.CompletableFuture;
 
 public final class OpenAiClient {
+    private static final Pattern INTENT_JSON = Pattern.compile(
+            "(?i)\"intent\"\\s*:\\s*\"(ASK|CONFIG|ANALYZE|COMMAND)\"");
+    private static final Pattern TRAILING_INTENT = Pattern.compile(
+            "(?i)(?:^|\\s)(ASK|CONFIG|ANALYZE|COMMAND)[.!]?\\s*$");
+    private static final Pattern COMMAND_LINE = Pattern.compile(
+            "(?i)^/?(?:give|item|summon|tp|teleport|effect|enchant|experience|xp|time|weather|gamemode|setblock|fill|playsound|particle|function|execute)\\b.*");
     private final CubePilotConfig config;
     private final HttpClient httpClient;
 
@@ -39,11 +48,9 @@ public final class OpenAiClient {
     }
 
     public CompletableFuture<AgentIntent> classify(String question) {
-        String system = "将请求分为 ASK、CONFIG、ANALYZE、COMMAND。CONFIG=查找 Mod 配置；"
-                + "ANALYZE=诊断日志/崩溃/配置；COMMAND=生成游戏指令或物品；其余=ASK。"
-                + "只输出 JSON：{\"intent\":\"ASK|CONFIG|ANALYZE|COMMAND\"}。";
+        String system = PromptTemplates.CLASSIFIER;
         String user = "管理员请求：\n" + (question == null ? "" : question);
-        return sendNormal(system, user, 48).thenApply(response -> parseIntent(response.body()));
+        return sendNormal(system, user, 512).thenApply(response -> parseIntent(response.body()));
     }
 
     /**
@@ -68,7 +75,7 @@ public final class OpenAiClient {
     }
 
     private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt) {
-        return sendNormal(systemPrompt, userPrompt, 900);
+        return sendNormal(systemPrompt, userPrompt, 2048);
     }
 
     private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt,
@@ -91,7 +98,7 @@ public final class OpenAiClient {
     private CompletableFuture<StringResponse> sendStreaming(String systemPrompt, String userPrompt) {
         HttpRequest request;
         try {
-            request = buildRequest(systemPrompt, userPrompt, true, 900);
+            request = buildRequest(systemPrompt, userPrompt, true, 2048);
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
@@ -134,32 +141,75 @@ public final class OpenAiClient {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
             JsonArray choices = root.getAsJsonArray("choices");
-            if (choices == null || choices.isEmpty()) {
-                throw new IllegalArgumentException("choices 为空");
-            }
-            JsonObject message = choices.get(0).getAsJsonObject().getAsJsonObject("message");
-            if (message == null || !message.has("content") || !message.get("content").isJsonPrimitive()) {
-                throw new IllegalArgumentException("message.content 缺失");
-            }
-            String content = message.get("content").getAsString();
-            String json = extractJsonObject(content);
-            JsonElement intentElement = JsonParser.parseString(json).getAsJsonObject().get("intent");
-            if (intentElement == null || !intentElement.isJsonPrimitive()
-                    || !intentElement.getAsJsonPrimitive().isString()) {
-                throw new IllegalArgumentException("intent 缺失或类型无效");
-            }
-            String intentName = intentElement.getAsString().trim();
-            return switch (intentName.toUpperCase(java.util.Locale.ROOT)) {
-                case "ASK" -> AgentIntent.ASK;
-                case "CONFIG" -> AgentIntent.CONFIG;
-                case "ANALYZE" -> AgentIntent.ANALYZE;
-                case "COMMAND" -> AgentIntent.COMMAND;
-                default -> throw new IllegalArgumentException("intent 不受支持");
-            };
+            if (choices == null || choices.isEmpty()) return AgentIntent.ASK;
+            JsonObject choice = choices.get(0).getAsJsonObject();
+            JsonObject message = choice.getAsJsonObject("message");
+            if (message == null) return AgentIntent.ASK;
+            AgentIntent intent = parseIntentText(contentToText(message.get("content")));
+            if (intent != null) return intent;
+            intent = parseIntentText(contentToText(message.get("reasoning_content")));
+            if (intent != null) return intent;
+            intent = parseIntentText(contentToText(choice.get("text")));
+            return intent == null ? AgentIntent.ASK : intent;
         } catch (RuntimeException exception) {
-            throw new java.util.concurrent.CompletionException(
-                    new IOException("模型请求分类响应格式无效，请重试", exception));
+            return AgentIntent.ASK;
         }
+    }
+
+    private static AgentIntent parseIntentText(String text) {
+        if (text == null || text.isBlank()) return null;
+        String cleaned = text.replaceAll("(?s)<think>.*?</think>", "").replace("```", "").trim();
+        try {
+            JsonElement value = JsonParser.parseString(extractJsonObject(cleaned)).getAsJsonObject().get("intent");
+            if (value != null && value.isJsonPrimitive()) {
+                AgentIntent parsed = intentFrom(value.getAsString());
+                if (parsed != null) return parsed;
+            }
+        } catch (RuntimeException ignored) {
+            // 兼容直接输出标签的分类器。
+        }
+        Matcher matcher = INTENT_JSON.matcher(cleaned);
+        if (matcher.find()) return intentFrom(matcher.group(1));
+        String[] lines = cleaned.split("\\R");
+        for (int index = lines.length - 1; index >= 0; index--) {
+            String line = lines[index].trim().replaceAll("^[^A-Za-z]+|[^A-Za-z]+$", "");
+            AgentIntent parsed = intentFrom(line);
+            if (parsed != null) return parsed;
+            Matcher trailing = TRAILING_INTENT.matcher(line);
+            if (trailing.find()) return intentFrom(trailing.group(1));
+            int colon = line.lastIndexOf(':');
+            if (colon >= 0) {
+                parsed = intentFrom(line.substring(colon + 1));
+                if (parsed != null) return parsed;
+            }
+        }
+        return null;
+    }
+
+    private static AgentIntent intentFrom(String value) {
+        if (value == null) return null;
+        return switch (value.trim().toUpperCase(Locale.ROOT)) {
+            case "ASK" -> AgentIntent.ASK;
+            case "CONFIG" -> AgentIntent.CONFIG;
+            case "ANALYZE" -> AgentIntent.ANALYZE;
+            case "COMMAND" -> AgentIntent.COMMAND;
+            default -> null;
+        };
+    }
+
+    private static String contentToText(JsonElement content) {
+        if (content == null || content.isJsonNull()) return "";
+        if (content.isJsonPrimitive()) return content.getAsString();
+        if (content.isJsonArray()) {
+            StringBuilder text = new StringBuilder();
+            for (JsonElement part : content.getAsJsonArray()) {
+                if (!part.isJsonObject()) continue;
+                JsonElement value = part.getAsJsonObject().get("text");
+                if (value != null && value.isJsonPrimitive()) text.append(value.getAsString());
+            }
+            if (!text.isEmpty()) return text.toString();
+        }
+        return content.toString();
     }
 
     private static AssistantReply readStreamingResponse(InputStream input, Consumer<String> answerConsumer) {
@@ -320,8 +370,7 @@ public final class OpenAiClient {
             if (contentElement == null || contentElement.isJsonNull()) {
                 throw new java.util.concurrent.CompletionException(new IOException("模型接口返回了空内容"));
             }
-            String content = contentElement.isJsonPrimitive()
-                    ? contentElement.getAsString() : contentElement.toString();
+            String content = contentToText(contentElement);
             return parseStructuredContent(content);
         } catch (java.util.concurrent.CompletionException exception) {
             throw exception;
@@ -331,37 +380,19 @@ public final class OpenAiClient {
         }
     }
 
-    /**
-     * 解析模型的结构化回复。模型偶尔会包裹 Markdown 或附加一句说明，
-     * 因此先提取完整 JSON 对象；解析失败必须让调用方显示明确错误，不能把原始 JSON 当答案。
-     */
+    /** 兼容 JSON、Markdown 包裹及纯文本回复；候选命令仍交给宿主安全策略校验。 */
     static AssistantReply parseStructuredContent(String content) {
         try {
+            if (content == null || content.isBlank()) throw new IllegalArgumentException("模型返回为空");
             String candidate = extractJsonObject(content);
             JsonElement parsed = JsonParser.parseString(candidate);
-            if (!parsed.isJsonObject()) {
-                throw new IllegalArgumentException("顶层不是 JSON 对象");
-            }
+            if (!parsed.isJsonObject()) return parsePlainReply(content);
             JsonObject json = parsed.getAsJsonObject();
-            JsonElement answerElement = json.get("answer");
-            if (answerElement == null || !answerElement.isJsonPrimitive()
-                    || !answerElement.getAsJsonPrimitive().isString()) {
-                throw new IllegalArgumentException("answer 不是字符串");
-            }
-            String answer = answerElement.getAsString().trim();
-            if (answer.isEmpty()) {
-                answer = "（AI 未提供文字说明）";
-            }
-
-            JsonArray suggestions = json.has("command_suggestions")
-                    && json.get("command_suggestions").isJsonArray()
-                    ? json.getAsJsonArray("command_suggestions") : new JsonArray();
+            String answer = firstString(json, "answer", "response", "text");
+            JsonArray suggestions = firstArray(json, "command_suggestions", "commands", "suggestions", "command");
             java.util.ArrayList<String> commands = new java.util.ArrayList<>();
-            for (JsonElement suggestion : suggestions) {
-                if (!suggestion.isJsonPrimitive()
-                        || !suggestion.getAsJsonPrimitive().isString()) {
-                    throw new IllegalArgumentException("command_suggestions 中包含非字符串");
-                }
+            for (JsonElement suggestion : suggestions == null ? new JsonArray() : suggestions) {
+                if (!suggestion.isJsonPrimitive() || !suggestion.getAsJsonPrimitive().isString()) continue;
                 String command = suggestion.getAsString().trim();
                 if (!command.isEmpty()) {
                     commands.add(command);
@@ -377,10 +408,97 @@ public final class OpenAiClient {
             if (clarificationRequired && !commands.isEmpty()) {
                 throw new IllegalArgumentException("澄清回复不能包含命令候选");
             }
+            if (commands.isEmpty() && !clarificationRequired && !answer.isEmpty()) {
+                AssistantReply answerWithCommand = parsePlainReply(answer);
+                if (!answerWithCommand.commandSuggestions().isEmpty()) {
+                    answer = answerWithCommand.answer();
+                    commands.addAll(answerWithCommand.commandSuggestions());
+                }
+            }
+            if (answer.isEmpty() && commands.isEmpty()) return parsePlainReply(content);
             return new AssistantReply(answer, commands, clarificationRequired);
         } catch (RuntimeException exception) {
-            throw new java.util.concurrent.CompletionException(new IOException(
-                    "AI 返回格式无效：未能解析 answer 或 command_suggestions，请重试", exception));
+            if (content != null && content.stripLeading().startsWith("{")) {
+                throw new java.util.concurrent.CompletionException(new IOException(
+                        "模型回复不是完整 JSON，请重试", exception));
+            }
+            return parsePlainReply(content);
+        }
+    }
+
+    private static String firstString(JsonObject json, String... keys) {
+        for (String key : keys) {
+            JsonElement value = json.get(key);
+            if (value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
+                return value.getAsString().trim();
+            }
+        }
+        return "";
+    }
+
+    private static JsonArray firstArray(JsonObject json, String... keys) {
+        for (String key : keys) {
+            JsonElement value = json.get(key);
+            if (value != null && value.isJsonArray()) return value.getAsJsonArray();
+            if (value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
+                JsonArray array = new JsonArray();
+                array.add(value.getAsString());
+                return array;
+            }
+        }
+        return null;
+    }
+
+    private static AssistantReply parsePlainReply(String content) {
+        String text = content == null ? "" : content.trim();
+        if (text.isEmpty()) return new AssistantReply("模型未返回内容。", java.util.List.of());
+        if (text.startsWith("{") || text.startsWith("[")) {
+            return new AssistantReply("模型回复格式异常，请重试。", java.util.List.of());
+        }
+        java.util.ArrayList<String> commands = new java.util.ArrayList<>();
+        StringBuilder answer = new StringBuilder();
+        boolean inCodeBlock = false;
+        StringBuilder code = new StringBuilder();
+        for (String rawLine : text.split("\\R")) {
+            String line = rawLine.trim();
+            if (line.startsWith("```")) {
+                if (inCodeBlock) {
+                    addPlainCandidate(code.toString(), commands, answer);
+                    code.setLength(0);
+                }
+                inCodeBlock = !inCodeBlock;
+                continue;
+            }
+            if (inCodeBlock) {
+                if (!code.isEmpty()) code.append('\n');
+                code.append(line);
+                continue;
+            }
+            addPlainCandidate(line, commands, answer);
+            if (commands.size() >= 3) break;
+        }
+        if (inCodeBlock && !code.isEmpty()) addPlainCandidate(code.toString(), commands, answer);
+        return new AssistantReply(answer.toString().trim(), commands);
+    }
+
+    private static void addPlainCandidate(String line, java.util.List<String> commands, StringBuilder answer) {
+        String value = line.trim();
+        if (value.isEmpty() || value.equalsIgnoreCase("json")) return;
+        if (value.startsWith("{") || value.startsWith("[")) return;
+        if (value.regionMatches(true, 0, "命令：", 0, 3)
+                || value.regionMatches(true, 0, "命令:", 0, 3)
+                || value.regionMatches(true, 0, "command:", 0, 8)) {
+            int separator = value.indexOf(':');
+            if (separator < 0) separator = value.indexOf('：');
+            value = value.substring(separator + 1).trim();
+        }
+        value = value.replaceAll("^`+|`+$", "").trim();
+        String command = value.replaceAll("\\s*\\R\\s*", " ");
+        if (COMMAND_LINE.matcher(command).matches()) {
+            commands.add(command.startsWith("/") ? command.substring(1) : command);
+        } else {
+            if (!answer.isEmpty()) answer.append('\n');
+            answer.append(value);
         }
     }
 

@@ -2,8 +2,9 @@
 **/build/
 **/run/
 **/run-data/
-temp/research/
-temp/build-cache/
+temp/
+.agents/
+/AGENTS.md
 *.iml
 .idea/
 .vscode/

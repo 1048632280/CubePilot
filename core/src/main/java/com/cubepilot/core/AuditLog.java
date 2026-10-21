@@ -6,11 +6,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.regex.Pattern;
 
 public final class AuditLog {
+    private static final long MAX_FILE_BYTES = 1024L * 1024L;
+    private static final int ARCHIVE_COUNT = 3;
+    private static final Object FILE_LOCK = new Object();
     private static final Pattern SECRET_ASSIGNMENT = Pattern.compile(
             "(?im)([\\\"']?(?:api[._ -]?key|password|passwd|secret|token|authorization|private[._ -]?key)[\\\"']?\\s*[:=]\\s*[\\\"']?)([^\\r\\n,;}\\\"']+)([\\\"']?)");
     private static final Pattern BEARER_TOKEN = Pattern.compile("(?i)Bearer\\s+[^\\s\\\"']+");
@@ -22,18 +28,82 @@ public final class AuditLog {
         this.path = directory.resolve("audit.jsonl");
     }
 
-    public synchronized void record(String actor, String action, String detail) {
+    public void record(String actor, String action, String detail) {
         JsonObject row = new JsonObject();
         row.addProperty("time", Instant.now().toString());
         row.addProperty("actor", safeField(actor, 128));
         row.addProperty("action", safeField(action, 128));
         row.addProperty("detail", safeField(detail, 2048));
+        synchronized (FILE_LOCK) {
+            try {
+                ensureLogFile();
+                byte[] encoded = (row + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+                rotateIfNeeded(encoded.length);
+                Files.write(path, encoded, StandardOpenOption.APPEND, StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS);
+            } catch (IOException exception) {
+                System.err.println("[CubePilot] 审计日志写入失败：" + exception.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private void ensureLogFile() throws IOException {
+        Path directory = path.getParent();
+        if (directory == null || Files.isSymbolicLink(directory)
+                || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("审计日志目录无效");
+        }
+        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("审计日志路径不是普通文件");
+            }
+            return;
+        }
         try {
-            Files.writeString(path, row + System.lineSeparator(), StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE,
-                    LinkOption.NOFOLLOW_LINKS);
-        } catch (IOException exception) {
-            System.err.println("[CubePilot] 审计日志写入失败：" + exception.getClass().getSimpleName());
+            Files.createFile(path);
+            restrictFilePermissions(path);
+        } catch (java.nio.file.FileAlreadyExistsException ignored) {
+            if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("审计日志路径不是普通文件");
+            }
+        }
+    }
+
+    private void rotateIfNeeded(int incomingBytes) throws IOException {
+        if (Files.size(path) + incomingBytes <= MAX_FILE_BYTES) {
+            return;
+        }
+        for (int index = 1; index <= ARCHIVE_COUNT; index++) {
+            Path candidate = archive(index);
+            if (Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)
+                    && (Files.isSymbolicLink(candidate)
+                            || !Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS))) {
+                throw new IOException("审计日志归档路径不是普通文件");
+            }
+        }
+        Path oldest = archive(ARCHIVE_COUNT);
+        Files.deleteIfExists(oldest);
+        for (int index = ARCHIVE_COUNT - 1; index >= 1; index--) {
+            Path source = archive(index);
+            if (Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
+                Files.move(source, archive(index + 1), StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        Files.move(path, archive(1), StandardCopyOption.REPLACE_EXISTING);
+        Files.createFile(path);
+        restrictFilePermissions(path);
+    }
+
+    private Path archive(int index) {
+        return path.resolveSibling("audit." + index + ".jsonl");
+    }
+
+    private static void restrictFilePermissions(Path file) throws IOException {
+        try {
+            Files.setPosixFilePermissions(file, EnumSet.of(
+                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+        } catch (UnsupportedOperationException ignored) {
+            // Windows 等平台由操作系统 ACL 管理文件权限。
         }
     }
 

@@ -1,9 +1,7 @@
 package com.cubepilot.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 
 class AgentIntentTest {
@@ -17,11 +15,22 @@ class AgentIntentTest {
     }
 
     @Test
-    void parsesClassifierResponseAndRejectsMalformedIntent() {
+    void parsesJsonAndPlainClassifierResponses() {
         String valid = "{\"choices\":[{\"message\":{\"content\":\"{\\\"intent\\\":\\\"COMMAND\\\"}\"}}]}";
         assertEquals(AgentIntent.COMMAND, OpenAiClient.parseIntent(valid));
 
-        String invalid = "{\"choices\":[{\"message\":{\"content\":\"{\\\"intent\\\":\\\"NOT_A_ROUTE\\\"}\"}}]}";
-        assertThrows(CompletionException.class, () -> OpenAiClient.parseIntent(invalid));
+        String plain = "{\"choices\":[{\"message\":{\"content\":\"ASK\\n\"}}]}";
+        assertEquals(AgentIntent.ASK, OpenAiClient.parseIntent(plain));
+
+        String fenced = "{\"choices\":[{\"message\":{\"content\":\"```json\\n{\\\"intent\\\":\\\"CONFIG\\\"}\\n```\"}}]}";
+        assertEquals(AgentIntent.CONFIG, OpenAiClient.parseIntent(fenced));
+
+        String segmented = "{\"choices\":[{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"COMMAND\"}]}}]}";
+        assertEquals(AgentIntent.COMMAND, OpenAiClient.parseIntent(segmented));
+    }
+
+    @Test
+    void malformedClassifierPayloadDoesNotBlockRequestRouting() {
+        assertEquals(AgentIntent.ASK, OpenAiClient.parseIntent("{}"));
     }
 }

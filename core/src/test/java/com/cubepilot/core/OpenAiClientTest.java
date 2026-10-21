@@ -27,7 +27,7 @@ class OpenAiClientTest {
                 () -> OpenAiClient.parseStructuredContent(
                         "{\"answer\":\"缺少结尾\",\"command_suggestions\":[\"give"));
 
-        assertEquals("AI 返回格式无效：未能解析 answer 或 command_suggestions，请重试",
+        assertEquals("模型回复不是完整 JSON，请重试",
                 exception.getCause().getMessage());
     }
 
@@ -46,6 +46,30 @@ class OpenAiClientTest {
         assertThrows(CompletionException.class, () -> OpenAiClient.parseStructuredContent(
                 "{\"answer\":\"确认吗？\",\"command_suggestions\":[\"give @s diamond\"],"
                         + "\"clarification_required\":true}"));
+    }
+
+    @Test
+    void acceptsPlainAnswersAndCommandCodeBlocksFromCompatibleModels() {
+        AssistantReply plain = OpenAiClient.parseStructuredContent("这是简短的普通回答。");
+        assertEquals("这是简短的普通回答。", plain.answer());
+        assertEquals(0, plain.commandSuggestions().size());
+
+        AssistantReply command = OpenAiClient.parseStructuredContent(
+                "已准备命令。\n```mcfunction\ngive @s diamond_sword 1\n```");
+        assertEquals("已准备命令。", command.answer());
+        assertEquals(List.of("give @s diamond_sword 1"), command.commandSuggestions());
+
+        AssistantReply labelled = OpenAiClient.parseStructuredContent("命令：/give @s diamond 1");
+        assertEquals(List.of("give @s diamond 1"), labelled.commandSuggestions());
+    }
+
+    @Test
+    void acceptsAlternativeStructuredFieldNames() {
+        AssistantReply reply = OpenAiClient.parseStructuredContent(
+                "{\"response\":\"已准备\",\"commands\":\"give @s diamond 2\"}");
+
+        assertEquals("已准备", reply.answer());
+        assertEquals(List.of("give @s diamond 2"), reply.commandSuggestions());
     }
 
     @Test

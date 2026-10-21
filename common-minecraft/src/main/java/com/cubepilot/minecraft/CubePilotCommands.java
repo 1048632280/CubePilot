@@ -8,6 +8,7 @@ import com.cubepilot.core.ConfigInspector;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.CubePilotTasks;
 import com.cubepilot.core.ModInfo;
+import com.cubepilot.core.PromptTemplates;
 import com.cubepilot.core.ReadOnlyFileAccess;
 import com.cubepilot.core.ServerSnapshot;
 import com.mojang.brigadier.CommandDispatcher;
@@ -37,7 +38,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
 public final class CubePilotCommands {
-    private static final List<String> ROOTS = List.of("cp", "cpilot", "cpa");
+    private static final List<String> ROOTS = List.of("cp", "cpa", "cpilot", "cubepilot");
     private static final String PREFIX = "[CubePilot] ";
     private static final int MAX_CONFIG_CONTEXT_CHARS = 44000;
     private static final long ALLOW_CONFIRM_TTL_MILLIS = 120_000L;
@@ -45,17 +46,6 @@ public final class CubePilotCommands {
     private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
     private static final Map<UUID, PendingClarification> PENDING_CLARIFICATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, Long> CHAT_COOLDOWNS = new ConcurrentHashMap<>();
-    private static final String ASK_TASK_PROMPT =
-            "任务：简短回答百科或服务器问题。只给最终结论；需要命令时只给必要命令，不解释执行过程。";
-    private static final String CONFIG_TASK_PROMPT =
-            "任务：只读定位 Mod 配置。自行从扫描证据识别 Mod；answer 分段输出，每项依次写 Mod、文件路径、行号/键、当前值、手工改法。最多 8 行，每行不超过 160 字；证据不足就只说未找到。不要输出命令。";
-    private static final String ANALYZE_TASK_PROMPT =
-            "任务：只读诊断日志、崩溃报告或配置。按‘结论；证据；建议’分段，最多 6 行，每行不超过 160 字；不确定时明确写不确定。不要输出命令。";
-    private static final String COMMAND_TASK_PROMPT =
-            "任务：把明确的 Minecraft 操作转成最少且完整的命令候选。按服务器版本使用正确语法，勿声称已执行。"
-                    + "物品/目标明确时直接生成；只有错别字导致无法识别、多个同名候选或缺少关键属性时才澄清。"
-                    + "澄清只问一个最关键问题，不输出命令；收到补充后继续原请求。拒绝无关危险操作。";
-
     private CubePilotCommands() {
     }
 
@@ -140,13 +130,14 @@ public final class CubePilotCommands {
     }
 
     private static int help(CommandSourceStack source) {
-        send(source, "命令别名：/cp、/cpilot、/cpa（需要 OP 2 级权限）");
-        send(source, "/cp <问题> 或 /cp ask <问题>：自动识别问答、配置、诊断或命令请求");
-        send(source, "/cp status：查看服务器基本状态");
-        send(source, "/cp reload：重新读取 CubePilot 自身 cubepilot.toml，不调用 API");
-        send(source, "/cp analyze <问题>：自动检索相关日志、崩溃报告或配置并诊断");
-        send(source, "/cp config <自然语言问题>：自动识别 Mod，扫描只读配置并回答当前值与手工修改方法");
-        send(source, "命令命中自动白名单且通过全部安全检查时会执行；其他允许显示的建议需点击后手动回车。");
+        sendCompactLines(source, "CubePilot（权限：OP 2；别名：cp、cpa、cpilot、cubepilot）"
+                + "\nhelp：显示帮助"
+                + "\nstatus：查看服务器状态"
+                + "\nreload：重载 CubePilot 配置"
+                + "\nconfig：只读检索 Mod 配置"
+                + "\nanalyze：只读分析日志与崩溃"
+                + "\nask：AI 问答；问题入口：自动识别类型"
+                + "\n命令按白名单自动执行，其余提供手动建议。", 9, 180);
         return 1;
     }
 
@@ -154,9 +145,7 @@ public final class CubePilotCommands {
             String loader, List<ModInfo> mods) {
         try {
             ServerSnapshot snapshot = runtimeSnapshot(context.getSource().getServer(), loader, mods);
-            for (String line : snapshot.toStatusText().split("\\n")) {
-                send(context.getSource(), line);
-            }
+            sendCompactLines(context.getSource(), snapshot.toStatusText(), 12, 180);
             return 1;
         } catch (IllegalArgumentException exception) {
             return fail(context.getSource(), "无法读取服务器状态：" + safeMessage(exception));
@@ -168,9 +157,8 @@ public final class CubePilotCommands {
         try {
             CubePilotAgent agent = CubePilotAgent.reload();
             agent.audit().record(source.getTextName(), "config.reload", "success");
-            send(source, "已重新加载 CubePilot 配置；后续请求将使用新配置。");
-            send(source, "API 地址：" + agent.config().endpoint());
-            send(source, "模型：" + agent.config().model());
+            sendCompactLines(source, "已重新加载配置。\nAPI：" + agent.config().endpoint()
+                    + "\n模型：" + agent.config().model(), 3, 180);
             return 1;
         } catch (IOException | IllegalArgumentException exception) {
             auditDenied(source, "config.reload", "cubepilot.toml", exception);
@@ -197,8 +185,7 @@ public final class CubePilotCommands {
                 .withStyle(ChatFormatting.RED)
                 .withStyle(style -> style.withClickEvent(new ClickEvent(
                         ClickEvent.Action.RUN_COMMAND, "/cp allow confirm " + confirmationToken)));
-        send(source, "即将把以下完整命令写入 CubePilot 自身配置；本次不会执行该命令：");
-        send(source, pending.command());
+        sendCompactLines(source, "即将写入自动白名单（本次不执行）：\n" + pending.command(), 3, 180);
         source.sendSuccess(() -> confirm, false);
         return 1;
     }
@@ -266,6 +253,11 @@ public final class CubePilotCommands {
 
     private static int analyzeRequest(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question) {
+        return analyzeRequest(source, loader, mods, question, true);
+    }
+
+    private static int analyzeRequest(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, boolean announce) {
         String request = question == null ? "" : question.trim();
         if (request.isBlank() || request.length() > 4000) {
             return fail(source, "诊断问题不能为空且长度不能超过 4000 个字符。");
@@ -277,7 +269,7 @@ public final class CubePilotCommands {
             auditDenied(source, "file.analyze", request, exception);
             return fail(source, exception.getMessage());
         }
-        send(source, "正在处理，请稍候…");
+        if (announce) send(source, "正在处理，请稍候…");
         CompletableFuture<ServerSnapshot> snapshot = snapshotAsync(
                 source.getServer(), loader, mods, agent.files());
         CubePilotTasks.supplyAsync(() -> {
@@ -288,7 +280,7 @@ public final class CubePilotCommands {
             }
         }).thenCombine(snapshot, AnalysisContext::new)
                 .thenCompose(context -> agent.ask(request, context.text(), context.snapshot(), 44000,
-                        ANALYZE_TASK_PROMPT))
+                        PromptTemplates.ANALYZE))
                 .whenComplete((reply, error) -> source.getServer().execute(() -> {
             if (error != null) {
                 auditDenied(source, "file.analyze", request, error);
@@ -323,7 +315,7 @@ public final class CubePilotCommands {
             }
             if (context.length() >= 42000) break;
         }
-        context.append("\n请自行选择与问题最相关的文件；用户提供的路径仅作为参考，不得编造证据。\n");
+        context.append("\n仅使用找到的文件证据，不要猜测路径或结论。\n");
         return context.toString();
     }
 
@@ -333,7 +325,7 @@ public final class CubePilotCommands {
         if (question.isBlank() || question.length() > 4000) {
             return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
         }
-        return askDiscoveredModConfig(source, loader, mods, question);
+        return askDiscoveredModConfig(source, loader, mods, question, true);
     }
 
     private static int route(CommandSourceStack source, String loader,
@@ -343,29 +335,31 @@ public final class CubePilotCommands {
         }
         try {
             CubePilotAgent agent = CubePilotAgent.get();
+            send(source, "正在处理，请稍候…");
             ServerPlayer player = source.getEntity() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
             PendingClarification pending = player == null ? null
                     : PENDING_CLARIFICATIONS.remove(player.getUUID());
             if (pending != null) {
                 if (pending.expiresAtMillis() > System.currentTimeMillis()) {
                     String combined = pending.question() + "\n玩家补充：" + question;
-                    return askDirect(source, loader, mods, combined, attachedContext, COMMAND_TASK_PROMPT, true);
+                    return askDirect(source, loader, mods, combined, attachedContext, PromptTemplates.COMMAND, true,
+                            false);
                 }
             }
-            send(source, "正在处理，请稍候…");
             agent.classify(question).whenComplete((intent, error) -> source.getServer().execute(() -> {
                 if (error != null) {
                     agent.audit().record(source.getTextName(), "request.route.error", safeMessage(error));
-                    send(source, "识别失败：" + shortText(safeMessage(error), 160));
+                    askDirect(source, loader, mods, question, attachedContext, PromptTemplates.AUTO, true, false);
                     return;
                 }
                 AgentIntent selected = intent == null ? AgentIntent.ASK : intent;
                 switch (selected) {
-                    case CONFIG -> configRequest(source, loader, mods, question);
-                    case ANALYZE -> analyzeRequest(source, loader, mods, question);
-                    case ASK -> askDirect(source, loader, mods, question, attachedContext, ASK_TASK_PROMPT, false);
+                    case CONFIG -> askDiscoveredModConfig(source, loader, mods, question, false);
+                    case ANALYZE -> analyzeRequest(source, loader, mods, question, false);
+                    case ASK -> askDirect(source, loader, mods, question, attachedContext, PromptTemplates.AUTO, true,
+                            false);
                     case COMMAND -> askDirect(source, loader, mods, question, attachedContext,
-                            COMMAND_TASK_PROMPT, true);
+                            PromptTemplates.COMMAND, true, false);
                 }
             }));
             return 1;
@@ -375,12 +369,12 @@ public final class CubePilotCommands {
     }
 
     private static int askDiscoveredModConfig(CommandSourceStack source, String loader,
-            List<ModInfo> mods, String question) {
+            List<ModInfo> mods, String question, boolean announce) {
         try {
             CubePilotAgent agent = CubePilotAgent.get();
             agent.audit().record(source.getTextName(), "config.auto-discover",
                     "question_length=" + question.length());
-            send(source, "正在查找配置，请稍候…");
+            if (announce) send(source, "正在处理，请稍候…");
             boolean useStreaming = agent.config().streaming();
             StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
             snapshotAsync(source.getServer(), loader, mods, agent.files()).thenCompose(snapshot ->
@@ -395,9 +389,9 @@ public final class CubePilotCommands {
                         "context_length=" + attachedContext.length());
                 return useStreaming
                         ? agent.askStreaming(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
-                                CONFIG_TASK_PROMPT, display::accept)
+                                PromptTemplates.CONFIG, display::accept)
                         : agent.ask(question, attachedContext, snapshot, MAX_CONFIG_CONTEXT_CHARS,
-                                CONFIG_TASK_PROMPT);
+                                PromptTemplates.CONFIG);
                 })).whenComplete((reply, error) -> source.getServer().execute(() -> {
                 if (display != null) {
                     display.flush();
@@ -444,9 +438,7 @@ public final class CubePilotCommands {
             }
             appendConfigSummary(context, files, path, perFileBudget);
         }
-        context.append("请由模型自行判断用户指的是哪个 Mod、文件和设置，不要依赖预设关键词。"
-                + "只根据所给证据回答：指出文件路径、行号、键路径和当前值，给出手工修改示例；"
-                + "证据不足时明确说明，不得编造。\n");
+        context.append("请自行判断用户指的是哪个 Mod 和设置，只使用这里提供的证据。\n");
         return context.toString();
     }
 
@@ -492,17 +484,23 @@ public final class CubePilotCommands {
 
     private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext) {
-        return askDirect(source, loader, mods, question, attachedContext, ASK_TASK_PROMPT, true);
+        return askDirect(source, loader, mods, question, attachedContext, PromptTemplates.ASK, true, true);
     }
 
     private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext, String taskPrompt) {
-        return askDirect(source, loader, mods, question, attachedContext, taskPrompt, true);
+        return askDirect(source, loader, mods, question, attachedContext, taskPrompt, true, true);
     }
 
     private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext,
             String taskPrompt, boolean allowCommands) {
+        return askDirect(source, loader, mods, question, attachedContext, taskPrompt, allowCommands, true);
+    }
+
+    private static int askDirect(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question, String attachedContext,
+            String taskPrompt, boolean allowCommands, boolean announce) {
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
         }
@@ -513,7 +511,7 @@ public final class CubePilotCommands {
             return fail(source, "CubePilot 配置读取失败：" + safeMessage(exception));
         }
         agent.audit().record(source.getTextName(), "request.start", "question_length=" + question.length());
-        send(source, "正在处理，请稍候…");
+        if (announce) send(source, "正在处理，请稍候…");
         boolean useStreaming = !allowCommands && agent.config().streaming();
         StreamDisplay display = useStreaming ? new StreamDisplay(source) : null;
         snapshotAsync(source.getServer(), loader, mods, agent.files())
@@ -567,8 +565,7 @@ public final class CubePilotCommands {
             pruneExpiredClarifications();
             PENDING_CLARIFICATIONS.put(player.getUUID(), new PendingClarification(
                     requestQuestion, System.currentTimeMillis() + CLARIFICATION_TTL_MILLIS));
-            send(source, shortText(reply.answer(), 180));
-            send(source, "请用 /cp <补充信息> 继续；2 分钟内有效。未确认前不会生成或执行命令。");
+            sendCompactLines(source, shortText(reply.answer(), 160) + "\n2 分钟内回复即可。", 2, 180);
             return;
         }
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
@@ -626,7 +623,9 @@ public final class CubePilotCommands {
         }
 
         if (!manualCommands.isEmpty() || !offerCommands.isEmpty()) {
-            sendCompactLines(source, reply.answer(), 8, 180);
+            if (reply.answer() != null && !reply.answer().isBlank()) {
+                sendCompactLines(source, reply.answer(), 8, 180);
+            }
             for (String command : manualCommands) {
                 Component clickable = Component.literal("手动执行：[点击输入]")
                         .withStyle(ChatFormatting.YELLOW)
@@ -647,10 +646,9 @@ public final class CubePilotCommands {
                                 ClickEvent.Action.RUN_COMMAND, "/cp allow add " + token)));
                 source.sendSuccess(() -> add, false);
             }
-            send(source, "以上建议未执行。");
         } else if (!reply.commandSuggestions().isEmpty()) {
             send(source, "命令未执行：" + shortText(
-                    rejectionReason == null ? "未通过安全或语法检查" : rejectionReason, 160));
+                    rejectionReason == null ? "未通过安全或语法检查" : rejectionReason, 120));
         } else {
             sendCompactLines(source, reply.answer(), 8, 180);
         }
@@ -702,12 +700,18 @@ public final class CubePilotCommands {
     /** 将模型说明按短行发送，避免聊天窗口只显示半句或出现空白行。 */
     private static void sendCompactLines(CommandSourceStack source, String text,
             int maxLines, int maxLineLength) {
+        sendCompactLines(source, text, maxLines, maxLineLength, true);
+    }
+
+    private static void sendCompactLines(CommandSourceStack source, String text,
+            int maxLines, int maxLineLength, boolean includePrefix) {
         if (text == null || text.isBlank()) {
-            send(source, "AI 未返回文字说明。");
+            sendReplyLine(source, "AI 未返回文字说明。", includePrefix);
             return;
         }
         int sent = 0;
         boolean truncated = false;
+        boolean prefixPending = includePrefix;
         for (String rawLine : text.replace('\r', '\n').split("\\n")) {
             String remaining = rawLine.trim();
             while (!remaining.isEmpty()) {
@@ -716,12 +720,14 @@ public final class CubePilotCommands {
                     break;
                 }
                 if (remaining.length() <= maxLineLength) {
-                    send(source, remaining);
+                    sendReplyLine(source, remaining, prefixPending);
+                    prefixPending = false;
                     sent++;
                     break;
                 }
                 int cut = findWrapPoint(remaining, maxLineLength);
-                send(source, remaining.substring(0, cut).trim() + "…");
+                sendReplyLine(source, remaining.substring(0, cut).trim() + "…", prefixPending);
+                prefixPending = false;
                 sent++;
                 remaining = remaining.substring(cut).trim();
             }
@@ -730,10 +736,10 @@ public final class CubePilotCommands {
             }
         }
         if (truncated) {
-            send(source, "（内容已截断）");
+            sendReplyLine(source, "（内容已截断）", prefixPending);
         }
         if (sent == 0) {
-            send(source, "AI 未返回可显示内容。");
+            sendReplyLine(source, "AI 未返回可显示内容。", prefixPending);
         }
     }
 
@@ -772,12 +778,21 @@ public final class CubePilotCommands {
     }
 
     private static int fail(CommandSourceStack source, String message) {
-        source.sendFailure(Component.literal(PREFIX + (message == null ? "操作失败" : message)));
+        source.sendFailure(Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA)
+                .append(Component.literal(message == null ? "操作失败" : message).withStyle(ChatFormatting.RED)));
         return 0;
     }
 
     private static void send(CommandSourceStack source, String message) {
-        source.sendSuccess(() -> Component.literal(PREFIX + message), false);
+        source.sendSuccess(() -> Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA)
+                .append(Component.literal(message)), false);
+    }
+
+    private static void sendReplyLine(CommandSourceStack source, String message, boolean includePrefix) {
+        Component line = includePrefix
+                ? Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA).append(Component.literal(message))
+                : Component.literal(message);
+        source.sendSuccess(() -> line, false);
     }
 
     private static void auditDenied(CommandSourceStack source, String action, String path, Throwable error) {
@@ -818,6 +833,7 @@ public final class CubePilotCommands {
         private int totalCharacters;
         private boolean truncated;
         private boolean sent;
+        private boolean prefixSent;
 
         private StreamDisplay(CommandSourceStack source) {
             this.source = source;
@@ -826,6 +842,7 @@ public final class CubePilotCommands {
         private void accept(String text) {
             if (text == null || text.isEmpty()) return;
             String chunk = null;
+            boolean includePrefix = false;
             synchronized (this) {
                 if (truncated) return;
                 int remaining = 4000 - totalCharacters;
@@ -843,23 +860,31 @@ public final class CubePilotCommands {
                 }
                 if (pending.length() >= 120 || containsSentenceEnd(pending)) {
                     chunk = takeChunk();
-                    sent = true;
+                    if (chunk != null) {
+                        sent = true;
+                        includePrefix = !prefixSent;
+                        prefixSent = true;
+                    }
                 }
             }
             if (chunk != null) {
                 String output = chunk;
-                source.getServer().execute(() -> sendCompactLines(source, output, 2, 180));
+                boolean firstChunk = includePrefix;
+                source.getServer().execute(() -> sendCompactLines(source, output, 2, 180, firstChunk));
             }
         }
 
         private void flush() {
             String chunk;
+            boolean includePrefix;
             synchronized (this) {
                 chunk = takeChunk();
                 if (chunk != null && !chunk.isBlank()) sent = true;
+                includePrefix = !prefixSent;
+                if (chunk != null && !chunk.isBlank()) prefixSent = true;
             }
             if (chunk != null && !chunk.isBlank()) {
-                sendCompactLines(source, chunk, 2, 180);
+                sendCompactLines(source, chunk, 2, 180, includePrefix);
             }
         }
 
