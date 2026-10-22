@@ -91,16 +91,4 @@ class OpenAiClientTest {
         assertEquals(List.of("give @s diamond 2"), reply.commandSuggestions());
     }
 
-    @Test
-    void streamingExtractorOnlyEmitsAnswerAndHidesJsonAndCommands() {
-        List<String> visible = new ArrayList<>();
-        OpenAiClient.AnswerExtractor extractor = new OpenAiClient.AnswerExtractor(visible::add);
-        extractor.accept("{\"an");
-        extractor.accept("swer\":\"第一段\\n第二");
-        extractor.accept("段\\\"\",\"command_suggestions\":[\"kill @a\"]}");
-
-        assertEquals("第一段\n第二段\"", String.join("", visible));
-        assertEquals(0, visible.stream().filter(text -> text.contains("kill") || text.contains("command_suggestions"))
-                .count());
-    }
 }

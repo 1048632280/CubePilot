@@ -78,6 +78,15 @@ public final class ReadOnlyFileAccess {
     }
 
     public String read(String relativePath) throws IOException {
+        return read(relativePath, null);
+    }
+
+    /** 每个请求独立累计原始文件字节，限制在读取和脱敏之前生效。 */
+    public ScanSession newScan(int maxFiles, int maxBytes) {
+        return new ScanSession(Math.max(1, maxFiles), Math.max(1, maxBytes));
+    }
+
+    private String read(String relativePath, ScanSession scan) throws IOException {
         Path file = resolve(relativePath, false);
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("指定路径不是普通文件");
@@ -86,15 +95,53 @@ public final class ReadOnlyFileAccess {
         if (size > maxFileBytes) {
             throw new IOException("文件超过读取上限（" + maxFileBytes + " 字节）");
         }
+        int readLimit = maxFileBytes + 1;
+        if (scan != null) {
+            int remaining = scan.maxBytes - scan.bytesRead;
+            if (size > remaining) throw new ScanLimitException();
+            readLimit = Math.min(readLimit, remaining);
+        }
         byte[] bytes;
         try (InputStream input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            bytes = input.readNBytes(maxFileBytes + 1);
+            bytes = input.readNBytes(readLimit);
         }
+        if (scan != null) scan.bytesRead += bytes.length;
         if (bytes.length > maxFileBytes) {
             throw new IOException("文件超过读取上限（" + maxFileBytes + " 字节）");
         }
+        if (scan != null && Files.size(file) > bytes.length) {
+            throw new ScanLimitException();
+        }
         String text = new String(bytes, StandardCharsets.UTF_8);
         return AuditLog.redact(text);
+    }
+
+    public final class ScanSession {
+        private final int maxFiles;
+        private final int maxBytes;
+        private int filesVisited;
+        private int bytesRead;
+
+        private ScanSession(int maxFiles, int maxBytes) {
+            this.maxFiles = maxFiles;
+            this.maxBytes = maxBytes;
+        }
+
+        public String read(String relativePath) throws IOException {
+            if (filesVisited >= maxFiles || bytesRead >= maxBytes) throw new ScanLimitException();
+            // 失败的读取也占用文件名额，避免大量异常文件绕过请求上限。
+            filesVisited++;
+            return ReadOnlyFileAccess.this.read(relativePath, this);
+        }
+
+        public int filesVisited() { return filesVisited; }
+        public int bytesRead() { return bytesRead; }
+    }
+
+    public static final class ScanLimitException extends IOException {
+        public ScanLimitException() {
+            super("扫描已达到本次请求上限，后续文件未读取");
+        }
     }
 
     public Map<String, String> readServerSettingsSnapshot() throws IOException {

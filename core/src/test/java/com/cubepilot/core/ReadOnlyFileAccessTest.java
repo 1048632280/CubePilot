@@ -101,4 +101,19 @@ class ReadOnlyFileAccessTest {
         assertEquals("{}", access.read("config/cubepilot-archive/settings.json"));
         assertThrows(IOException.class, () -> access.read("config/cubepilot/cubepilot.toml"));
     }
+
+    @Test
+    void scanSessionStopsAtFileAndByteLimits() throws IOException {
+        Path config = Files.createDirectories(serverRoot.resolve("config/example"));
+        Files.writeString(config.resolve("one.txt"), "12345678");
+        Files.writeString(config.resolve("two.txt"), "abcdefgh");
+        ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
+        ReadOnlyFileAccess.ScanSession scan = access.newScan(1, 8);
+
+        assertEquals("12345678", scan.read("config/example/one.txt"));
+        assertThrows(ReadOnlyFileAccess.ScanLimitException.class,
+                () -> scan.read("config/example/two.txt"));
+        assertEquals(1, scan.filesVisited());
+        assertEquals(8, scan.bytesRead());
+    }
 }

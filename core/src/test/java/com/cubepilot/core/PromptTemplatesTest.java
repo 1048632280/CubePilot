@@ -28,13 +28,12 @@ class PromptTemplatesTest {
 
     @Test
     void commandPromptSeparatesClarificationCandidatesAndHostSafety() {
-        assertTrue(PromptTemplates.COMMAND.contains("answer 只写“请手动执行：”"));
-        assertTrue(PromptTemplates.COMMAND.contains("命令数组为空"));
-        assertTrue(PromptTemplates.COMMAND.contains("Brigadier 校验决定自动执行或显示可点击建议"));
-        assertTrue(PromptTemplates.COMMAND.contains("没有找到这个物品，请重新输入"));
-        assertTrue(PromptTemplates.COMMAND.contains("不得把原始命令或整段 NBT 展示给玩家"));
-        assertTrue(PromptTemplates.COMMAND.contains("点击组件填充完整命令"));
-        assertTrue(PromptTemplates.COMMAND_VERIFIER.contains("候选独立核对"));
-        assertTrue(PromptTemplates.COMMAND_VERIFIER.contains("无法确认"));
+        assertTrue(PromptTemplates.COMMAND_1_20_1.contains("Minecraft Java 1.20.1"));
+        assertTrue(PromptTemplates.COMMAND_1_21_1.contains("Minecraft Java 1.21.1"));
+        assertTrue(PromptTemplates.commandFor("1.20.1").equals(PromptTemplates.COMMAND_1_20_1));
+        assertTrue(PromptTemplates.commandFor("1.21.1").equals(PromptTemplates.COMMAND_1_21_1));
+        assertTrue(PromptTemplates.commandFor("1.22").contains("不得猜测或生成命令"));
+        assertTrue(PromptTemplates.commandVerifierFor("1.20.1").contains("目标版本：Minecraft Java 1.20.1"));
+        assertTrue(PromptTemplates.commandVerifierFor("1.21.1").contains("目标版本：Minecraft Java 1.21.1"));
     }
 }

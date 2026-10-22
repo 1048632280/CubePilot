@@ -6,12 +6,12 @@ import org.junit.jupiter.api.Test;
 
 class AgentIntentTest {
     @Test
-    void acceptsKnownValuesCaseInsensitivelyAndDefaultsToAsk() {
+    void acceptsKnownValuesAndKeepsInvalidValuesDistinctFromAsk() {
         assertEquals(AgentIntent.CONFIG, AgentIntent.from(" config "));
         assertEquals(AgentIntent.ANALYZE, AgentIntent.from("ANALYZE"));
         assertEquals(AgentIntent.COMMAND, AgentIntent.from("command"));
-        assertEquals(AgentIntent.ASK, AgentIntent.from("unknown"));
-        assertEquals(AgentIntent.ASK, AgentIntent.from(null));
+        assertEquals(AgentIntent.UNKNOWN, AgentIntent.from("unknown"));
+        assertEquals(AgentIntent.UNKNOWN, AgentIntent.from(null));
     }
 
     @Test
@@ -30,7 +30,7 @@ class AgentIntentTest {
     }
 
     @Test
-    void malformedClassifierPayloadDoesNotBlockRequestRouting() {
-        assertEquals(AgentIntent.ASK, OpenAiClient.parseIntent("{}"));
+    void malformedClassifierPayloadIsNotSilentlyRoutedAsAsk() {
+        assertEquals(AgentIntent.UNKNOWN, OpenAiClient.parseIntent("{}"));
     }
 }

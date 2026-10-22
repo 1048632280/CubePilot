@@ -5,17 +5,19 @@ public enum AgentIntent {
     ASK,
     CONFIG,
     ANALYZE,
-    COMMAND;
+    COMMAND,
+    UNKNOWN;
 
     public static AgentIntent from(String value) {
         if (value == null) {
-            return ASK;
+            return UNKNOWN;
         }
         return switch (value.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "ASK" -> ASK;
             case "CONFIG" -> CONFIG;
             case "ANALYZE" -> ANALYZE;
             case "COMMAND" -> COMMAND;
-            default -> ASK;
+            default -> UNKNOWN;
         };
     }
 }

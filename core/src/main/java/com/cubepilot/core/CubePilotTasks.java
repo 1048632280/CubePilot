@@ -10,7 +10,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
-/** CubePilot 的有界后台任务池，避免文件扫描和流式响应占用 Minecraft 主线程。 */
+/** CubePilot 的有界后台任务池，避免网络请求和文件扫描占用 Minecraft 主线程。 */
 public final class CubePilotTasks {
     private static final AtomicInteger THREAD_ID = new AtomicInteger();
     private static final ThreadFactory THREAD_FACTORY = runnable -> {

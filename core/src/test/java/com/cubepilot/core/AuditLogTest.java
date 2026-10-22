@@ -55,4 +55,23 @@ class AuditLogTest {
         assertTrue(content.contains("[已隐藏]"));
         assertFalse(content.contains("top-secret"));
     }
+
+    @Test
+    void canDisableTraceWithoutDisablingAudit() throws IOException {
+        AuditLog audit = new AuditLog(directory, false, 1024);
+        audit.record("Admin", "command.executed", "ok");
+        audit.recordTrace("req-2", "Admin", "model.response", "input", "hidden");
+
+        assertTrue(Files.isRegularFile(directory.resolve("audit.jsonl")));
+        assertFalse(Files.exists(directory.resolve("trace.jsonl")));
+    }
+
+    @Test
+    void marksTruncatedFields() throws IOException {
+        AuditLog audit = new AuditLog(directory, true, 1024);
+        audit.recordTrace("req-3", "Admin", "long", "x".repeat(2000), "ok");
+
+        String content = Files.readString(directory.resolve("trace.jsonl"));
+        assertTrue(content.contains("已截断"));
+    }
 }

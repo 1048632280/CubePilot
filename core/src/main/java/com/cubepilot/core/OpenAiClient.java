@@ -5,9 +5,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -17,8 +14,8 @@ import java.time.Duration;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.function.Consumer;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 public final class OpenAiClient {
     private static final Pattern INTENT_JSON = Pattern.compile(
@@ -39,32 +36,54 @@ public final class OpenAiClient {
     }
 
     public CompletableFuture<AssistantReply> ask(String systemPrompt, String userPrompt) {
+        return ask(systemPrompt, userPrompt, ignored -> { });
+    }
+
+    public CompletableFuture<AssistantReply> ask(String systemPrompt, String userPrompt,
+            Consumer<String> rawResponseConsumer) {
         try {
             return sendNormal(systemPrompt, userPrompt)
-                    .thenApply(response -> parseReply(response.body()));
+                    .thenApply(response -> {
+                        notifyRawResponse(rawResponseConsumer, response.body());
+                        return parseReply(response.body());
+                    });
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
     }
 
     public CompletableFuture<AgentIntent> classify(String question) {
+        return classify(question, ignored -> { });
+    }
+
+    public CompletableFuture<AgentIntent> classify(String question, Consumer<String> rawResponseConsumer) {
         String system = PromptTemplates.CLASSIFIER;
         String user = "管理员请求：\n" + (question == null ? "" : question);
-        return sendNormal(system, user, 512).thenApply(response -> parseIntent(response.body()));
+        return sendNormal(system, user, 512).thenApply(response -> {
+            notifyRawResponse(rawResponseConsumer, response.body());
+            return parseIntent(response.body());
+        });
     }
 
     /** 由独立模型请求逐项核验候选命令是否保留原请求约束。 */
     public CompletableFuture<java.util.List<CommandVerification>> verifyCommand(String question,
             java.util.List<String> commands,
-            String attachedContext) {
+            String attachedContext, String minecraftVersion) {
+        return verifyCommand(question, commands, attachedContext, minecraftVersion, ignored -> { });
+    }
+
+    public CompletableFuture<java.util.List<CommandVerification>> verifyCommand(String question,
+            java.util.List<String> commands, String attachedContext, String minecraftVersion,
+            Consumer<String> rawResponseConsumer) {
         JsonObject request = new JsonObject();
         request.addProperty("request", question == null ? "" : question);
         JsonArray candidates = new JsonArray();
         commands.forEach(candidates::add);
         request.add("candidate_commands", candidates);
         request.addProperty("server_context", attachedContext == null ? "" : attachedContext);
-        return sendNormal(PromptTemplates.COMMAND_VERIFIER, request.toString(), 768)
+        return sendNormal(PromptTemplates.commandVerifierFor(minecraftVersion), request.toString(), 768)
                 .thenApply(response -> {
+                    notifyRawResponse(rawResponseConsumer, response.body());
                     java.util.List<CommandVerification> results = parseCommandVerification(response.body());
                     if (results.size() != commands.size()) {
                         throw new java.util.concurrent.CompletionException(
@@ -78,6 +97,40 @@ public final class OpenAiClient {
                     }
                     return results;
                 });
+    }
+
+    private static void notifyRawResponse(Consumer<String> consumer, String body) {
+        if (consumer == null) return;
+        try {
+            consumer.accept(visibleResponse(body));
+        } catch (RuntimeException ignored) {
+            // 审计回调不能影响模型响应解析和主请求结果。
+        }
+    }
+
+    /** 只保留模型可见内容，避免把兼容接口返回的隐藏推理字段写入请求链日志。 */
+    private static String visibleResponse(String body) {
+        if (body == null || body.isBlank()) return "";
+        try {
+            JsonElement root = JsonParser.parseString(body);
+            stripHiddenReasoning(root);
+            return root.toString();
+        } catch (RuntimeException ignored) {
+            return body;
+        }
+    }
+
+    private static void stripHiddenReasoning(JsonElement element) {
+        if (element == null || element.isJsonNull()) return;
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            object.remove("reasoning_content");
+            object.remove("reasoning");
+            object.remove("thinking");
+            for (JsonElement child : object.values()) stripHiddenReasoning(child);
+        } else if (element.isJsonArray()) {
+            for (JsonElement child : element.getAsJsonArray()) stripHiddenReasoning(child);
+        }
     }
 
     static java.util.List<CommandVerification> parseCommandVerification(String body) {
@@ -124,27 +177,6 @@ public final class OpenAiClient {
         }
     }
 
-    /**
-     * 请求 SSE 流式响应。回调只接收 answer 字段的文字增量，绝不接收命令字段或 JSON 标记。
-     */
-    public CompletableFuture<AssistantReply> askStreaming(String systemPrompt, String userPrompt,
-            Consumer<String> answerConsumer) {
-        try {
-            return sendStreaming(systemPrompt, userPrompt).thenCompose(response -> {
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                closeQuietly(response.body());
-                if (config.streamingFallback()) {
-                    return ask(systemPrompt, userPrompt);
-                }
-                return CompletableFuture.failedFuture(httpError(response.statusCode()));
-            }
-            return CubePilotTasks.supplyAsync(() -> readStreamingResponse(response.body(), answerConsumer));
-            });
-        } catch (RuntimeException exception) {
-            return CompletableFuture.failedFuture(exception);
-        }
-    }
-
     private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt) {
         return sendNormal(systemPrompt, userPrompt, 2048);
     }
@@ -153,7 +185,7 @@ public final class OpenAiClient {
             int maxTokens) {
         HttpRequest request;
         try {
-            request = buildRequest(systemPrompt, userPrompt, false, maxTokens);
+            request = buildRequest(systemPrompt, userPrompt, maxTokens);
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
@@ -166,18 +198,7 @@ public final class OpenAiClient {
                 });
     }
 
-    private CompletableFuture<StringResponse> sendStreaming(String systemPrompt, String userPrompt) {
-        HttpRequest request;
-        try {
-            request = buildRequest(systemPrompt, userPrompt, true, 2048);
-        } catch (RuntimeException exception) {
-            return CompletableFuture.failedFuture(exception);
-        }
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
-                .thenApply(response -> new StringResponse(response.statusCode(), response.body()));
-    }
-
-    private HttpRequest buildRequest(String systemPrompt, String userPrompt, boolean streaming, int maxTokens) {
+    private HttpRequest buildRequest(String systemPrompt, String userPrompt, int maxTokens) {
         String key = config.apiKey();
         if (key.isBlank()) {
             throw new IllegalStateException(
@@ -188,7 +209,7 @@ public final class OpenAiClient {
         payload.addProperty("model", config.model());
         payload.addProperty("temperature", 0.2);
         payload.addProperty("max_tokens", Math.max(16, Math.min(maxTokens, 4096)));
-        payload.addProperty("stream", streaming);
+        payload.addProperty("stream", false);
         JsonArray messages = new JsonArray();
         messages.add(message("system", systemPrompt));
         messages.add(message("user", userPrompt));
@@ -212,18 +233,18 @@ public final class OpenAiClient {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
             JsonArray choices = root.getAsJsonArray("choices");
-            if (choices == null || choices.isEmpty()) return AgentIntent.ASK;
+            if (choices == null || choices.isEmpty()) return AgentIntent.UNKNOWN;
             JsonObject choice = choices.get(0).getAsJsonObject();
             JsonObject message = choice.getAsJsonObject("message");
-            if (message == null) return AgentIntent.ASK;
+            if (message == null) return AgentIntent.UNKNOWN;
             AgentIntent intent = parseIntentText(contentToText(message.get("content")));
             if (intent != null) return intent;
             intent = parseIntentText(contentToText(message.get("reasoning_content")));
             if (intent != null) return intent;
             intent = parseIntentText(contentToText(choice.get("text")));
-            return intent == null ? AgentIntent.ASK : intent;
+            return intent == null ? AgentIntent.UNKNOWN : intent;
         } catch (RuntimeException exception) {
-            return AgentIntent.ASK;
+            return AgentIntent.UNKNOWN;
         }
     }
 
@@ -281,153 +302,6 @@ public final class OpenAiClient {
             if (!text.isEmpty()) return text.toString();
         }
         return content.toString();
-    }
-
-    private static AssistantReply readStreamingResponse(InputStream input, Consumer<String> answerConsumer) {
-        StringBuilder content = new StringBuilder();
-        AnswerExtractor extractor = new AnswerExtractor(answerConsumer);
-        boolean[] sawReasoning = {false};
-        try (InputStream stream = input;
-                BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line;
-            boolean done = false;
-            while (!done && (line = reader.readLine()) != null) {
-                String eventLine = line.trim();
-                if (!eventLine.startsWith("data:")) {
-                    continue;
-                }
-                String data = eventLine.substring(5).trim();
-                if (data.equals("[DONE]")) {
-                    done = true;
-                    continue;
-                }
-                JsonObject event = JsonParser.parseString(data).getAsJsonObject();
-                JsonArray choices = event.getAsJsonArray("choices");
-                if (choices == null || choices.isEmpty()) {
-                    continue;
-                }
-                JsonObject choice = choices.get(0).getAsJsonObject();
-                JsonObject delta = choice.getAsJsonObject("delta");
-                JsonElement piece = delta == null ? null : delta.get("content");
-                JsonElement reasoning = delta == null ? null : delta.get("reasoning_content");
-                if (reasoning != null && !reasoning.isJsonNull() && !contentToText(reasoning).isBlank()) {
-                    sawReasoning[0] = true;
-                }
-                if (piece != null && piece.isJsonPrimitive() && piece.getAsJsonPrimitive().isString()) {
-                    String text = piece.getAsString();
-                    content.append(text);
-                    extractor.accept(text);
-                }
-            }
-            if (content.length() == 0) {
-                if (sawReasoning[0]) {
-                    return new AssistantReply("模型未返回可用答案，请重试。", java.util.List.of());
-                }
-                throw new IOException("模型接口没有返回流式内容");
-            }
-            return parseStructuredContent(content.toString());
-        } catch (java.util.concurrent.CompletionException exception) {
-            throw exception;
-        } catch (Exception exception) {
-            throw new java.util.concurrent.CompletionException(new IOException(
-                    "模型接口流式响应格式无效，请检查兼容 API 的 SSE 支持", exception));
-        }
-    }
-
-    private static void closeQuietly(InputStream input) {
-        try {
-            if (input != null) input.close();
-        } catch (IOException ignored) {
-            // 关闭响应流失败不应覆盖原始 API 错误。
-        }
-    }
-
-    private record StringResponse(int statusCode, InputStream body) {
-    }
-
-    /** 增量识别 JSON answer 字符串，避免把 JSON 语法和命令字段显示到聊天栏。 */
-    static final class AnswerExtractor {
-        private final Consumer<String> consumer;
-        private final StringBuilder raw = new StringBuilder();
-        private final StringBuilder unicode = new StringBuilder();
-        private int scanIndex;
-        private int openingQuote = -1;
-        private boolean inString;
-        private boolean escaped;
-        private boolean unicodeEscape;
-        private boolean finished;
-
-        AnswerExtractor(Consumer<String> consumer) {
-            this.consumer = consumer;
-        }
-
-        void accept(String piece) {
-            if (finished || piece == null || piece.isEmpty()) return;
-            raw.append(piece);
-            if (openingQuote < 0) {
-                int key = findAnswerKey();
-                if (key < 0) return;
-                int colon = raw.indexOf(":", key + 8);
-                if (colon < 0) return;
-                int quote = colon + 1;
-                while (quote < raw.length() && Character.isWhitespace(raw.charAt(quote))) quote++;
-                if (quote >= raw.length() || raw.charAt(quote) != '\"') return;
-                openingQuote = quote;
-                scanIndex = quote + 1;
-                inString = true;
-            }
-            StringBuilder visible = new StringBuilder();
-            while (scanIndex < raw.length() && inString) {
-                char current = raw.charAt(scanIndex++);
-                if (unicodeEscape) {
-                    if (Character.digit(current, 16) < 0) {
-                        throw new IllegalArgumentException("answer 包含无效 Unicode 转义");
-                    }
-                    unicode.append(current);
-                    if (unicode.length() == 4) {
-                        visible.append((char) Integer.parseInt(unicode.toString(), 16));
-                        unicode.setLength(0);
-                        unicodeEscape = false;
-                    }
-                    continue;
-                }
-                if (escaped) {
-                    escaped = false;
-                    if (current == 'u') {
-                        unicode.setLength(0);
-                        unicodeEscape = true;
-                    } else {
-                        visible.append(switch (current) {
-                            case 'n' -> '\n'; case 'r' -> '\r'; case 't' -> '\t';
-                            case 'b' -> '\b'; case 'f' -> '\f'; default -> current;
-                        });
-                    }
-                } else if (current == '\\') {
-                    escaped = true;
-                } else if (current == '\"') {
-                    inString = false;
-                    finished = true;
-                } else {
-                    visible.append(current);
-                }
-            }
-            if (visible.length() > 0) consumer.accept(visible.toString());
-        }
-
-        private int findAnswerKey() {
-            int search = 0;
-            while (search < raw.length()) {
-                int key = raw.indexOf("\"answer\"", search);
-                if (key < 0) return -1;
-                int before = key - 1;
-                while (before >= 0 && Character.isWhitespace(raw.charAt(before))) before--;
-                if (before >= 0 && (raw.charAt(before) == '{' || raw.charAt(before) == ',')) {
-                    return key;
-                }
-                search = key + 8;
-            }
-            return -1;
-        }
     }
 
     private static JsonObject message(String role, String content) {

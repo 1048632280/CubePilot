@@ -24,10 +24,18 @@ public final class AuditLog {
 
     private final Path path;
     private final Path tracePath;
+    private final boolean traceEnabled;
+    private final int traceMaxFieldChars;
 
     public AuditLog(Path directory) {
+        this(directory, true, 48000);
+    }
+
+    public AuditLog(Path directory, boolean traceEnabled, int traceMaxFieldChars) {
         this.path = directory.resolve("audit.jsonl");
         this.tracePath = directory.resolve("trace.jsonl");
+        this.traceEnabled = traceEnabled;
+        this.traceMaxFieldChars = Math.max(1024, Math.min(traceMaxFieldChars, 48000));
     }
 
     public void record(String actor, String action, String detail) {
@@ -41,13 +49,14 @@ public final class AuditLog {
 
     /** 记录一次请求链的输入输出摘要；不记录模型隐藏思维链，只记录可审计文本。 */
     public void recordTrace(String requestId, String actor, String action, String input, String output) {
+        if (!traceEnabled) return;
         JsonObject row = new JsonObject();
         row.addProperty("time", Instant.now().toString());
         row.addProperty("request_id", safeField(requestId, 64));
         row.addProperty("actor", safeField(actor, 128));
         row.addProperty("action", safeField(action, 128));
-        row.addProperty("input", safeField(input, 12000));
-        row.addProperty("output", safeField(output, 12000));
+        row.addProperty("input", safeField(input, traceMaxFieldChars));
+        row.addProperty("output", safeField(output, traceMaxFieldChars));
         write(tracePath, row);
     }
 
@@ -146,7 +155,10 @@ public final class AuditLog {
         if (value == null || value.isBlank()) {
             return "";
         }
-        String safe = safeDiagnosticText(value).replaceAll("[\\r\\n]", " ");
-        return safe.length() <= maxLength ? safe : safe.substring(0, maxLength);
+        String safe = redact(value).replace("\u0000", "").replaceAll("[\\r\\n]", " ");
+        if (safe.length() <= maxLength) return safe;
+        String marker = "…（已截断）";
+        int end = Math.max(0, maxLength - marker.length());
+        return safe.substring(0, end) + marker;
     }
 }
