@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
@@ -128,7 +129,9 @@ public final class OpenAiClient {
             object.remove("reasoning_content");
             object.remove("reasoning");
             object.remove("thinking");
-            for (JsonElement child : object.values()) stripHiddenReasoning(child);
+            for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+                stripHiddenReasoning(entry.getValue());
+            }
         } else if (element.isJsonArray()) {
             for (JsonElement child : element.getAsJsonArray()) stripHiddenReasoning(child);
         }
