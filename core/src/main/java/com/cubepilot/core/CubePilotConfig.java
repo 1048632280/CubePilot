@@ -30,15 +30,28 @@ public final class CubePilotConfig {
     private static final String DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
     private static final String DEFAULT_MODEL = "gpt-4o-mini";
     private static final int DEFAULT_TIMEOUT_SECONDS = 45;
+    private static final int DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
     private static final int DEFAULT_MAX_FILE_BYTES = 16384;
     private static final int DEFAULT_MAX_SCAN_FILES = 48;
     private static final int DEFAULT_MAX_SCAN_BYTES = 524288;
+    private static final Set<String> SUPPORTED_KEYS = Set.of(
+            "api.endpoint", "api.model", "api.key", "api.timeout-seconds", "api.max-response-bytes",
+            "automation.chat-trigger-enabled", "automation.chat-prefixes", "automation.chat-permission-level",
+            "files.max-bytes", "files.max-scan-files", "files.max-scan-bytes",
+            "logging.trace-enabled", "logging.max-field-characters",
+            "command.offer-add-to-auto-allow",
+            "command.auto-allow.roots", "command.auto-allow.subcommands", "command.auto-allow.exact",
+            "command.auto-deny.roots", "command.auto-deny.subcommands", "command.auto-deny.exact",
+            "command.safety.all-players-selector", "command.safety.all-entities-selector",
+            "command.safety.complex-nbt", "command.safety.multiple-targets",
+            "command.safety.other-players");
 
     private final Path directory;
     private final String endpoint;
     private final String model;
     private final String apiKey;
     private final int timeoutSeconds;
+    private final int maxResponseBytes;
     private final boolean chatTriggerEnabled;
     private final List<String> chatPrefixes;
     private final int chatPermissionLevel;
@@ -58,6 +71,8 @@ public final class CubePilotConfig {
         this.model = stringValue(values, "api.model", DEFAULT_MODEL).trim();
         this.apiKey = stringValue(values, "api.key", "").trim();
         this.timeoutSeconds = boundedInt(values, "api.timeout-seconds", DEFAULT_TIMEOUT_SECONDS, 5, 120);
+        this.maxResponseBytes = boundedInt(values, "api.max-response-bytes",
+                DEFAULT_MAX_RESPONSE_BYTES, 16384, 4194304);
         this.chatTriggerEnabled = booleanValue(values, "automation.chat-trigger-enabled", false);
         this.chatPrefixes = listValue(values, "automation.chat-prefixes").stream()
                 .map(String::trim).filter(prefix -> !prefix.isEmpty()).distinct().toList();
@@ -146,7 +161,14 @@ public final class CubePilotConfig {
     }
 
     private static CubePilotConfig parse(Path directory, String contents) {
-        return new CubePilotConfig(directory, parseToml(contents));
+        Map<String, Object> values = parseToml(contents);
+        for (String key : values.keySet()) {
+            if (!SUPPORTED_KEYS.contains(key)) {
+                throw new IllegalArgumentException("CubePilot 不支持配置项：" + key
+                        + "；请只修改默认模板中已有的配置项");
+            }
+        }
+        return new CubePilotConfig(directory, values);
     }
 
     private static Map<String, Object> parseToml(String contents) {
@@ -158,7 +180,11 @@ public final class CubePilotConfig {
             if (clean.isEmpty()) {
                 continue;
             }
-            if (clean.startsWith("[") && clean.endsWith("]") && !clean.startsWith("[[")) {
+            if (clean.startsWith("[[")) {
+                throw new IllegalArgumentException("CubePilot 配置不支持 TOML 表数组（第 "
+                        + (index + 1) + " 行）");
+            }
+            if (clean.startsWith("[") && clean.endsWith("]")) {
                 section = clean.substring(1, clean.length() - 1).trim();
                 if (!section.matches("[A-Za-z0-9_.-]+")) {
                     throw new IllegalArgumentException("TOML 第 " + (index + 1) + " 行的分区名称无效");
@@ -534,6 +560,8 @@ public final class CubePilotConfig {
 
     private static String defaultContents() {
         return "# CubePilot 主配置文件。文件编码必须保持为 UTF-8。\n"
+                + "# 本文件使用受控 TOML 子集：仅支持默认模板中的分区、键、字符串、整数、布尔值和字符串数组。\n"
+                + "# 不支持内联表、表数组、日期等其他 TOML 结构；未知配置项会在 /cp reload 时明确报错。\n"
                 + "# 修改完成后，在游戏内由 OP 2 级及以上玩家执行 /cp reload 即可生效。\n"
                 + "# 重载只读取 CubePilot 自身配置，不会调用模型 API，也不会热加载其他 Mod。\n"
                 + "# 重载失败时继续使用上一份有效配置；请根据聊天提示检查本文件。\n\n"
@@ -547,6 +575,8 @@ public final class CubePilotConfig {
                 + "key = \"\"\n"
                 + "# 请求超时秒数，有效范围 5～120；超出范围会被限制到最近的边界值。\n"
                 + "timeout-seconds = 45\n"
+                + "# 模型接口响应体最大字节数，有效范围 16384～4194304；超限会立即中止读取。\n"
+                + "max-response-bytes = 2097152\n\n"
                 + banner("2. 聊天前缀触发（默认关闭）")
                 + "[automation]\n"
                 + "# true：只有匹配下方前缀且达到权限等级的玩家消息才进入 AI 意图路由；普通聊天不会发送给模型。\n"
@@ -598,7 +628,7 @@ public final class CubePilotConfig {
                 + "]\n\n"
                 + banner("7. 可调整的自动执行禁止名单")
                 + "# 命中此处任意规则的命令永远不会自动执行，即使它同时命中自动白名单。\n"
-                + "# 它仍可按第 7 节安全项的设置显示为手动建议，由玩家检查后自行回车。\n"
+                + "# 它仍可按第 9 节安全项的设置显示为手动建议，由玩家检查后自行回车。\n"
                 + "# roots、subcommands、exact 的匹配层级与上一节完全相同；默认不额外禁止。\n"
                 + "[command.auto-deny]\n"
                 + "roots = [\n"
@@ -703,6 +733,7 @@ public final class CubePilotConfig {
     }
 
     public int timeoutSeconds() { return timeoutSeconds; }
+    public int maxResponseBytes() { return maxResponseBytes; }
     public boolean chatTriggerEnabled() { return chatTriggerEnabled; }
     public List<String> chatPrefixes() { return chatPrefixes; }
     public int chatPermissionLevel() { return chatPermissionLevel; }

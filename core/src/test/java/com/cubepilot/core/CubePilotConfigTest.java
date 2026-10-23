@@ -30,6 +30,8 @@ class CubePilotConfigTest {
         assertTrue(contents.contains("offer-add-to-auto-allow = true"));
         assertTrue(contents.contains("max-scan-files = 48"));
         assertTrue(contents.contains("max-scan-bytes = 524288"));
+        assertTrue(contents.contains("max-response-bytes = 2097152"));
+        assertTrue(contents.contains("受控 TOML 子集"));
 
         Files.writeString(configPath, "[api]\nendpoint = \"http://remote.example.invalid/v1\"\n");
         assertEquals(configPath, CubePilotConfig.ensureExists(serverRoot));
@@ -62,6 +64,7 @@ class CubePilotConfigTest {
         assertEquals(0, config.safetyMode(CubePilotConfig.SafetyRule.MULTIPLE_TARGETS));
         assertEquals(48, config.maxScanFiles());
         assertEquals(524288, config.maxScanBytes());
+        assertEquals(2097152, config.maxResponseBytes());
         assertTrue(config.chatTriggerEnabled());
         assertEquals(1, config.chatPermissionLevel());
         assertEquals(java.util.List.of("!ai"), config.chatPrefixes());
@@ -110,6 +113,18 @@ class CubePilotConfigTest {
         assertThrows(IllegalArgumentException.class, () -> CubePilotConfig.load(serverRoot));
 
         Files.writeString(configPath, defaults.replace("    # \"time\",", "    \"time set\","));
+        assertThrows(IllegalArgumentException.class, () -> CubePilotConfig.load(serverRoot));
+    }
+
+    @Test
+    void rejectsUnknownKeysAndUnsupportedTomlStructures() throws IOException {
+        Path configPath = CubePilotConfig.ensureExists(serverRoot);
+        String defaults = Files.readString(configPath);
+
+        Files.writeString(configPath, defaults + "\nunknown-option = true\n");
+        assertThrows(IllegalArgumentException.class, () -> CubePilotConfig.load(serverRoot));
+
+        Files.writeString(configPath, defaults + "\n[[api.backends]]\nname = \"extra\"\n");
         assertThrows(IllegalArgumentException.class, () -> CubePilotConfig.load(serverRoot));
     }
 }

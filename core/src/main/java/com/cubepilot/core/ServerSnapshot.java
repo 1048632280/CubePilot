@@ -15,7 +15,15 @@ public record ServerSnapshot(
         boolean whitelistEnabled,
         Map<String, String> serverSettings,
         List<String> configurationFiles,
+        boolean configurationInventoryTruncated,
         List<String> mods) {
+
+    public ServerSnapshot(Instant capturedAt, String minecraftVersion, String loader, String difficulty,
+            int onlinePlayerCount, boolean whitelistEnabled, Map<String, String> serverSettings,
+            List<String> configurationFiles, List<String> mods) {
+        this(capturedAt, minecraftVersion, loader, difficulty, onlinePlayerCount, whitelistEnabled,
+                serverSettings, configurationFiles, false, mods);
+    }
 
     public ServerSnapshot {
         serverSettings = Collections.unmodifiableMap(new TreeMap<>(serverSettings));
@@ -46,9 +54,9 @@ public record ServerSnapshot(
             text.append("\n（没有发现白名单文本文件）");
         } else {
             configurationFiles.stream().limit(80).forEach(path -> text.append("\n").append(path));
-            if (configurationFiles.size() > 80) {
-                text.append("\n（其余文件未纳入快照）");
-            }
+        }
+        if (configurationInventoryTruncated) {
+            text.append("\n（清单已达到扫描边界，不代表服务器全部文件）");
         }
         return text.toString();
     }

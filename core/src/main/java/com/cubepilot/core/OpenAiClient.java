@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -44,8 +45,8 @@ public final class OpenAiClient {
         try {
             return sendNormal(systemPrompt, userPrompt)
                     .thenApply(response -> {
-                        notifyRawResponse(rawResponseConsumer, response.body());
-                        return parseReply(response.body());
+                        notifyRawResponse(rawResponseConsumer, response);
+                        return parseReply(response);
                     });
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
@@ -60,8 +61,8 @@ public final class OpenAiClient {
         String system = PromptTemplates.CLASSIFIER;
         String user = "管理员请求：\n" + (question == null ? "" : question);
         return sendNormal(system, user, 512).thenApply(response -> {
-            notifyRawResponse(rawResponseConsumer, response.body());
-            return parseIntent(response.body());
+            notifyRawResponse(rawResponseConsumer, response);
+            return parseIntent(response);
         });
     }
 
@@ -83,8 +84,8 @@ public final class OpenAiClient {
         request.addProperty("server_context", attachedContext == null ? "" : attachedContext);
         return sendNormal(PromptTemplates.commandVerifierFor(minecraftVersion), request.toString(), 768)
                 .thenApply(response -> {
-                    notifyRawResponse(rawResponseConsumer, response.body());
-                    java.util.List<CommandVerification> results = parseCommandVerification(response.body());
+                    notifyRawResponse(rawResponseConsumer, response);
+                    java.util.List<CommandVerification> results = parseCommandVerification(response);
                     if (results.size() != commands.size()) {
                         throw new java.util.concurrent.CompletionException(
                                 new IOException("命令完整性核验未覆盖全部候选"));
@@ -177,11 +178,11 @@ public final class OpenAiClient {
         }
     }
 
-    private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt) {
+    private CompletableFuture<String> sendNormal(String systemPrompt, String userPrompt) {
         return sendNormal(systemPrompt, userPrompt, 2048);
     }
 
-    private CompletableFuture<HttpResponse<String>> sendNormal(String systemPrompt, String userPrompt,
+    private CompletableFuture<String> sendNormal(String systemPrompt, String userPrompt,
             int maxTokens) {
         HttpRequest request;
         try {
@@ -189,13 +190,33 @@ public final class OpenAiClient {
         } catch (RuntimeException exception) {
             return CompletableFuture.failedFuture(exception);
         }
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenApply(response -> {
+        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
+                .thenCompose(response -> {
                     if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                        try {
+                            response.body().close();
+                        } catch (IOException ignored) {
+                            // 关闭错误响应流失败不覆盖原始 HTTP 错误。
+                        }
                         throw new java.util.concurrent.CompletionException(httpError(response.statusCode()));
                     }
-                    return response;
+                    return CubePilotTasks.supplyAsync(() -> readBounded(
+                            response.body(), config.maxResponseBytes()));
                 });
+    }
+
+    static String readBounded(InputStream input, int maxBytes) {
+        try (InputStream stream = input) {
+            byte[] bytes = stream.readNBytes(maxBytes + 1);
+            if (bytes.length > maxBytes) {
+                throw new java.util.concurrent.CompletionException(
+                        new IOException("模型接口响应超过 " + maxBytes + " 字节上限"));
+            }
+            return new String(bytes, StandardCharsets.UTF_8);
+        } catch (IOException exception) {
+            throw new java.util.concurrent.CompletionException(
+                    new IOException("读取模型接口响应失败", exception));
+        }
     }
 
     private HttpRequest buildRequest(String systemPrompt, String userPrompt, int maxTokens) {

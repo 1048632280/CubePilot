@@ -11,12 +11,24 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 public final class AuditLog {
     private static final long MAX_FILE_BYTES = 1024L * 1024L;
     private static final int ARCHIVE_COUNT = 3;
     private static final Object FILE_LOCK = new Object();
+    private static final AtomicLong LAST_QUEUE_WARNING = new AtomicLong();
+    private static final ThreadPoolExecutor WRITER = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2048), runnable -> {
+                Thread thread = new Thread(runnable, "CubePilot-AuditWriter");
+                thread.setDaemon(true);
+                return thread;
+            }, (task, executor) -> warnQueueFull());
     private static final Pattern SECRET_ASSIGNMENT = Pattern.compile(
             "(?im)([\\\"']?(?:api[._ -]?key|password|passwd|secret|token|authorization|private[._ -]?key)[\\\"']?\\s*[:=]\\s*[\\\"']?)([^\\r\\n,;}\\\"']+)([\\\"']?)");
     private static final Pattern BEARER_TOKEN = Pattern.compile("(?i)Bearer\\s+[^\\s\\\"']+");
@@ -44,7 +56,7 @@ public final class AuditLog {
         row.addProperty("actor", safeField(actor, 128));
         row.addProperty("action", safeField(action, 128));
         row.addProperty("detail", safeField(detail, 2048));
-        write(path, row);
+        enqueue(path, row);
     }
 
     /** 记录一次请求链的输入输出摘要；不记录模型隐藏思维链，只记录可审计文本。 */
@@ -57,7 +69,27 @@ public final class AuditLog {
         row.addProperty("action", safeField(action, 128));
         row.addProperty("input", safeField(input, traceMaxFieldChars));
         row.addProperty("output", safeField(output, traceMaxFieldChars));
-        write(tracePath, row);
+        enqueue(tracePath, row);
+    }
+
+    private void enqueue(Path target, JsonObject row) {
+        WRITER.execute(() -> write(target, row));
+    }
+
+    private static void warnQueueFull() {
+        long now = System.currentTimeMillis();
+        long previous = LAST_QUEUE_WARNING.get();
+        if (now - previous >= TimeUnit.MINUTES.toMillis(1)
+                && LAST_QUEUE_WARNING.compareAndSet(previous, now)) {
+            System.err.println("[CubePilot] 审计日志队列已满，部分记录被丢弃");
+        }
+    }
+
+    /** 仅供测试等待此前提交的写入完成，生产调用不会阻塞。 */
+    static boolean awaitPendingWrites(long timeout, TimeUnit unit) throws InterruptedException {
+        CountDownLatch barrier = new CountDownLatch(1);
+        WRITER.execute(barrier::countDown);
+        return barrier.await(timeout, unit);
     }
 
     private void write(Path target, JsonObject row) {

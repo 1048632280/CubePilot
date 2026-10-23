@@ -27,6 +27,15 @@ class ConfigInspectorTest {
     }
 
     @Test
+    void doesNotInventJsonLineWhenLeafKeyIsRepeated() {
+        ConfigInspector.ConfigDocument document = ConfigInspector.inspect("config/repeated.json",
+                "{\n  \"first\": {\"enabled\": true},\n  \"second\": {\"enabled\": false}\n}\n");
+
+        assertEquals(0, find(document.entries(), "first.enabled").line());
+        assertEquals(0, find(document.entries(), "second.enabled").line());
+    }
+
+    @Test
     void extractsYamlTomlAndPropertiesKeys() {
         ConfigInspector.ConfigDocument yaml = ConfigInspector.inspect("config/example.yaml",
                 "server:\n  view-distance: 8\n  password: hidden\n");

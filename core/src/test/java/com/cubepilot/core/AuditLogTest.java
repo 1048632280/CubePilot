@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +29,7 @@ class AuditLogTest {
     void persistsRedactedStructuredEventsAndRotatesOldFiles() throws IOException {
         AuditLog audit = new AuditLog(directory);
         audit.record("Admin", "command.suggested", "api.key=top-secret");
+        assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
 
         String first = Files.readString(directory.resolve("audit.jsonl"));
         assertTrue(first.contains("\"actor\":\"Admin\""));
@@ -39,6 +41,7 @@ class AuditLogTest {
         for (int index = 0; index < 700; index++) {
             audit.record("Admin", "request.complete", detail);
         }
+        assertTrue(AuditLog.awaitPendingWrites(10, TimeUnit.SECONDS));
 
         assertTrue(Files.isRegularFile(directory.resolve("audit.1.jsonl")));
         assertTrue(Files.size(directory.resolve("audit.jsonl")) <= 1024L * 1024L);
@@ -48,6 +51,7 @@ class AuditLogTest {
     void recordsTraceFieldsWithoutSecrets() throws IOException {
         AuditLog audit = new AuditLog(directory);
         audit.recordTrace("req-1", "Admin", "model.output", "api.key=top-secret", "answer=ok");
+        assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
 
         String content = Files.readString(directory.resolve("trace.jsonl"));
         assertTrue(content.contains("\"request_id\":\"req-1\""));
@@ -61,6 +65,7 @@ class AuditLogTest {
         AuditLog audit = new AuditLog(directory, false, 1024);
         audit.record("Admin", "command.executed", "ok");
         audit.recordTrace("req-2", "Admin", "model.response", "input", "hidden");
+        assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
 
         assertTrue(Files.isRegularFile(directory.resolve("audit.jsonl")));
         assertFalse(Files.exists(directory.resolve("trace.jsonl")));
@@ -70,6 +75,7 @@ class AuditLogTest {
     void marksTruncatedFields() throws IOException {
         AuditLog audit = new AuditLog(directory, true, 1024);
         audit.recordTrace("req-3", "Admin", "long", "x".repeat(2000), "ok");
+        assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
 
         String content = Files.readString(directory.resolve("trace.jsonl"));
         assertTrue(content.contains("已截断"));

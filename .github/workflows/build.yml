@@ -96,6 +96,53 @@ jobs:
           fi
           cp "${jars[0]}" "artifacts/${ARTIFACT}.jar"
 
+      - name: Verify distributable JAR structure
+        env:
+          PROJECT: ${{ matrix.target.project }}
+          ARTIFACT: ${{ matrix.target.artifact }}
+        run: |
+          jar_file="artifacts/${ARTIFACT}.jar"
+          jar tf "$jar_file" > jar-contents.txt
+          grep -q '^com/cubepilot/core/CubePilotAgent.class$' jar-contents.txt
+          grep -q '^com/cubepilot/minecraft/CubePilotCommands.class$' jar-contents.txt
+          case "$PROJECT" in
+            fabric-*) grep -q '^fabric.mod.json$' jar-contents.txt ;;
+            forge-1.20.1) grep -q '^META-INF/mods.toml$' jar-contents.txt ;;
+            neoforge-1.21.1) grep -q '^META-INF/neoforge.mods.toml$' jar-contents.txt ;;
+            *) echo "Unknown build target: $PROJECT" >&2; exit 1 ;;
+          esac
+
+      - name: Smoke-test dedicated server startup
+        env:
+          PROJECT: ${{ matrix.target.project }}
+        run: |
+          mkdir -p "$PROJECT/run" "$PROJECT/run/server"
+          printf 'eula=true\n' > "$PROJECT/run/eula.txt"
+          printf 'eula=true\n' > "$PROJECT/run/server/eula.txt"
+          timeout --signal=INT 180s ./gradlew "-PtargetProject=${PROJECT}" ":${PROJECT}:runServer" --no-daemon \
+            > server-smoke.log 2>&1 &
+          server_pid=$!
+          ready=false
+          for _ in $(seq 1 90); do
+            if grep -Eq 'Done \([0-9.]+s\)!' server-smoke.log; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if kill -0 "$server_pid" 2>/dev/null; then
+            kill -INT "$server_pid" 2>/dev/null || true
+          fi
+          wait "$server_pid" || true
+          cat server-smoke.log
+          if [ "$ready" != true ]; then
+            echo "Dedicated server did not reach the ready state." >&2
+            exit 1
+          fi
+
       - name: Upload JAR artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

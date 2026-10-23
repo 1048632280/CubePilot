@@ -217,13 +217,18 @@ public final class ConfigInspector {
         if (leaf.isBlank()) {
             return 0;
         }
-        String quoted = "\"" + java.util.regex.Pattern.quote(leaf) + "\"";
+        String quoted = "\"" + java.util.regex.Pattern.quote(leaf) + "\"\\s*:";
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(quoted).matcher(text);
         if (!matcher.find()) {
             return 0;
         }
+        int matchStart = matcher.start();
+        if (matcher.find()) {
+            // 仅凭叶键无法区分重复名称所属的对象；宁可不报行号，也不能指向错误位置。
+            return 0;
+        }
         int line = 1;
-        for (int index = 0; index < matcher.start(); index++) {
+        for (int index = 0; index < matchStart; index++) {
             if (text.charAt(index) == '\n') {
                 line++;
             }

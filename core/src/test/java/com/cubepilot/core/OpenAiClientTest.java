@@ -8,9 +8,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionException;
+import java.io.ByteArrayInputStream;
 import org.junit.jupiter.api.Test;
 
 class OpenAiClientTest {
+
+    @Test
+    void boundedResponseReaderRejectsOversizedBodies() {
+        assertEquals("hello", OpenAiClient.readBounded(
+                new ByteArrayInputStream("hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)), 5));
+        assertThrows(CompletionException.class, () -> OpenAiClient.readBounded(
+                new ByteArrayInputStream("123456".getBytes(java.nio.charset.StandardCharsets.UTF_8)), 5));
+    }
 
     @Test
     void parsesGenericCommandVerificationAndRejectsMissingConstraints() {

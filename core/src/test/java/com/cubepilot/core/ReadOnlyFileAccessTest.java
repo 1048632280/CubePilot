@@ -116,4 +116,19 @@ class ReadOnlyFileAccessTest {
         assertEquals(1, scan.filesVisited());
         assertEquals(8, scan.bytesRead());
     }
+
+    @Test
+    void inventoryReportsWhenSafetyLimitTruncatesResults() throws IOException {
+        Path config = Files.createDirectories(serverRoot.resolve("config/many"));
+        for (int index = 0; index < 90; index++) {
+            Files.writeString(config.resolve("file-" + index + ".toml"), "enabled=true\n");
+        }
+        ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
+
+        ReadOnlyFileAccess.FileInventory inventory = access.configurationInventory();
+
+        assertEquals(80, inventory.paths().size());
+        assertTrue(inventory.truncated());
+        assertTrue(inventory.visitedEntries() >= 80);
+    }
 }

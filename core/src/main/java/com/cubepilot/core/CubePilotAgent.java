@@ -13,13 +13,18 @@ public final class CubePilotAgent {
     private final ReadOnlyFileAccess fileAccess;
     private final OpenAiClient openAiClient;
     private final AuditLog auditLog;
-    private final ConversationStore conversations = new ConversationStore();
+    private final ConversationStore conversations;
 
     private CubePilotAgent(Path serverRoot) throws IOException {
+        this(serverRoot, new ConversationStore());
+    }
+
+    private CubePilotAgent(Path serverRoot, ConversationStore conversations) throws IOException {
         this.config = CubePilotConfig.load(serverRoot);
         this.fileAccess = new ReadOnlyFileAccess(serverRoot, config.maxFileBytes());
         this.openAiClient = new OpenAiClient(config);
         this.auditLog = new AuditLog(config.directory(), config.traceLogging(), config.traceMaxFieldChars());
+        this.conversations = conversations;
     }
 
     public static CubePilotAgent get() throws IOException {
@@ -45,8 +50,10 @@ public final class CubePilotAgent {
     /** 原子替换 Agent；构造失败时保留旧实例和旧配置。 */
     public static CubePilotAgent reload() throws IOException {
         synchronized (CubePilotAgent.class) {
+            ConversationStore conversations = instance == null
+                    ? new ConversationStore() : instance.conversations;
             CubePilotAgent replacement = new CubePilotAgent(
-                    Path.of(".").toAbsolutePath().normalize());
+                    Path.of(".").toAbsolutePath().normalize(), conversations);
             instance = replacement;
             return replacement;
         }
@@ -59,7 +66,9 @@ public final class CubePilotAgent {
             String original = CubePilotConfig.readRaw(serverRoot);
             try {
                 boolean added = CubePilotConfig.addExactAutoAllowedCommand(serverRoot, command);
-                CubePilotAgent replacement = new CubePilotAgent(serverRoot);
+                ConversationStore conversations = instance == null
+                        ? new ConversationStore() : instance.conversations;
+                CubePilotAgent replacement = new CubePilotAgent(serverRoot, conversations);
                 instance = replacement;
                 return added;
             } catch (IOException | RuntimeException exception) {

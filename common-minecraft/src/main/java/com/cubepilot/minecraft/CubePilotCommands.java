@@ -6,6 +6,8 @@ import com.cubepilot.core.AuditLog;
 import com.cubepilot.core.CommandPolicy;
 import com.cubepilot.core.CommandVerification;
 import com.cubepilot.core.ConfigInspector;
+import com.cubepilot.core.DiagnosticAnalyzer;
+import com.cubepilot.core.DiagnosticReport;
 import com.cubepilot.core.CubePilotAgent;
 import com.cubepilot.core.CubePilotTasks;
 import com.cubepilot.core.ModInfo;
@@ -48,7 +50,8 @@ public final class CubePilotCommands {
     private static final int MAX_DISPLAY_WIDTH = 48;
     private static final Map<String, PendingAllow> PENDING_ALLOWS = new ConcurrentHashMap<>();
     private static final Map<UUID, PendingClarification> PENDING_CLARIFICATIONS = new ConcurrentHashMap<>();
-    private static final Map<UUID, Long> CHAT_COOLDOWNS = new ConcurrentHashMap<>();
+    private static final Map<UUID, Long> AI_REQUEST_COOLDOWNS = new ConcurrentHashMap<>();
+    private static final long AI_REQUEST_COOLDOWN_MILLIS = TimeUnit.SECONDS.toMillis(8);
     private CubePilotCommands() {
     }
 
@@ -81,14 +84,6 @@ public final class CubePilotCommands {
                 server.execute(() -> send(player.createCommandSourceStack(), "问题过长，请控制在 4000 个字符以内。"));
                 return true;
             }
-            long now = System.currentTimeMillis();
-            CHAT_COOLDOWNS.entrySet().removeIf(entry -> now - entry.getValue() >= TimeUnit.MINUTES.toMillis(10));
-            long previous = CHAT_COOLDOWNS.getOrDefault(player.getUUID(), 0L);
-            if (now - previous < TimeUnit.SECONDS.toMillis(8)) {
-                server.execute(() -> send(player.createCommandSourceStack(), "请求太频繁，请稍后再试。"));
-                return true;
-            }
-            CHAT_COOLDOWNS.put(player.getUUID(), now);
             server.execute(() -> {
                 route(player.createCommandSourceStack(), loader, mods, question, "");
             });
@@ -125,9 +120,8 @@ public final class CubePilotCommands {
                                         StringArgumentType.getString(context, "request")))))
                 .then(Commands.literal("ask")
                         .then(Commands.argument("question", StringArgumentType.greedyString())
-                                .executes(context -> askDirect(context.getSource(), loader, mods,
-                                        StringArgumentType.getString(context, "question"), "",
-                                        PromptTemplates.ASK, false))))
+                                .executes(context -> askRequest(context.getSource(), loader, mods,
+                                        StringArgumentType.getString(context, "question")))))
                 .then(Commands.argument("question", StringArgumentType.greedyString())
                         .executes(context -> route(context.getSource(), loader, mods,
                                 StringArgumentType.getString(context, "question"), "")));
@@ -255,6 +249,22 @@ public final class CubePilotCommands {
         return source.getEntity() == null ? "" : source.getEntity().getUUID().toString();
     }
 
+    /** 所有会调用模型的玩家入口共用冷却；内部路由转发不得再次调用。 */
+    private static boolean acquireAiRequest(CommandSourceStack source) {
+        if (!(source.getEntity() instanceof ServerPlayer player)) return true;
+        long now = System.currentTimeMillis();
+        AI_REQUEST_COOLDOWNS.entrySet().removeIf(
+                entry -> now - entry.getValue() >= TimeUnit.MINUTES.toMillis(10));
+        Long previous = AI_REQUEST_COOLDOWNS.putIfAbsent(player.getUUID(), now);
+        if (previous == null) return true;
+        if (now - previous >= AI_REQUEST_COOLDOWN_MILLIS
+                && AI_REQUEST_COOLDOWNS.replace(player.getUUID(), previous, now)) {
+            return true;
+        }
+        send(source, "请求太频繁，请稍后再试。");
+        return false;
+    }
+
     private static int analyzeRequest(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question) {
         return analyzeRequest(source, loader, mods, question, true);
@@ -262,7 +272,12 @@ public final class CubePilotCommands {
 
     private static int analyzeRequest(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, boolean announce) {
-        return analyzeRequest(source, loader, mods, question, announce, UUID.randomUUID().toString());
+        String request = question == null ? "" : question.trim();
+        if (request.isBlank() || request.length() > 4000) {
+            return fail(source, "诊断问题不能为空且长度不能超过 4000 个字符。");
+        }
+        if (announce && !acquireAiRequest(source)) return 0;
+        return analyzeRequest(source, loader, mods, request, announce, UUID.randomUUID().toString());
     }
 
     private static int analyzeRequest(CommandSourceStack source, String loader,
@@ -313,7 +328,11 @@ public final class CubePilotCommands {
             int maxFiles, int maxBytes) throws IOException {
         StringBuilder context = new StringBuilder("服务端问题诊断上下文（只读）：\n用户问题：")
                 .append(question).append("\n可供模型自行判断的文件：\n");
-        List<String> paths = files.configurationInventorySnapshot();
+        ReadOnlyFileAccess.FileInventory inventory = files.configurationInventory();
+        List<String> paths = inventory.paths();
+        if (inventory.truncated()) {
+            context.append("清单状态：已截断，仅代表扫描到的部分文件。\n");
+        }
         ReadOnlyFileAccess.ScanSession scan = files.newScan(maxFiles, maxBytes);
         boolean limited = false;
         for (String path : paths) {
@@ -325,6 +344,19 @@ public final class CubePilotCommands {
             context.append("\n文件：").append(path).append('\n');
             try {
                 String contents = scan.read(path);
+                DiagnosticReport localReport = DiagnosticAnalyzer.analyze(path, contents);
+                if (!localReport.findings().isEmpty()) {
+                    context.append("本地规则诊断：\n");
+                    for (DiagnosticReport.Finding finding : localReport.findings()) {
+                        context.append("- [").append(finding.severity()).append("] ")
+                                .append(finding.code()).append("：").append(finding.message());
+                        if (!finding.evidence().isBlank()) {
+                            context.append("；").append(finding.evidence());
+                        }
+                        context.append('\n');
+                    }
+                }
+                context.append("原文节选：\n");
                 context.append(contents, 0, Math.min(contents.length(), 3500)).append('\n');
                 if (contents.length() > 3500) context.append("（该文件节选已截断）\n");
             } catch (ReadOnlyFileAccess.ScanLimitException exception) {
@@ -354,6 +386,7 @@ public final class CubePilotCommands {
         if (question.isBlank() || question.length() > 4000) {
             return fail(source, "配置问题不能为空且长度不能超过 4000 个字符。");
         }
+        if (!acquireAiRequest(source)) return 0;
         return askDiscoveredModConfig(source, loader, mods, question, true);
     }
 
@@ -362,6 +395,7 @@ public final class CubePilotCommands {
         if (question == null || question.isBlank() || question.length() > 4000) {
             return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
         }
+        if (!acquireAiRequest(source)) return 0;
         try {
             CubePilotAgent agent = CubePilotAgent.get();
             send(source, "正在处理，请稍候…");
@@ -381,9 +415,10 @@ public final class CubePilotCommands {
                     "conversation_turns=" + agent.conversationSize(actorId(source)));
             agent.classify(actorId(source), question, requestId).whenComplete((intent, error) -> source.getServer().execute(() -> {
                 if (error != null || intent == null || intent == AgentIntent.UNKNOWN) {
-                    agent.audit().record(source.getTextName(), "request.route.error", safeMessage(error));
+                    String reason = error == null ? "分类器返回无效意图" : safeMessage(error);
+                    agent.audit().record(source.getTextName(), "request.route.error", reason);
                     agent.audit().recordTrace(requestId, actorId(source), "classifier.error", question,
-                            error == null ? "分类器返回无效意图" : safeMessage(error));
+                            reason);
                     send(source, "请求分类失败，请重试或使用明确的子命令。");
                     return;
                 }
@@ -454,13 +489,20 @@ public final class CubePilotCommands {
 
     private static String discoverAllConfigContext(ReadOnlyFileAccess files, List<ModInfo> mods,
             String question, int maxFiles, int maxBytes) throws IOException {
-        List<String> paths = files.configurationFilesSnapshot();
+        ReadOnlyFileAccess.FileInventory inventory = files.configurationInventory();
+        List<String> paths = inventory.paths().stream()
+                .filter(path -> path.startsWith("config/") || path.startsWith("defaultconfigs/")
+                        || path.startsWith("world/serverconfig/"))
+                .toList();
         StringBuilder context = new StringBuilder("Mod 配置广泛扫描上下文（只读、未做关键词筛选）：\n")
                 .append("用户问题：").append(question)
                 .append("\n已加载 Mod（ID / 显示名 / 版本）：\n");
         mods.stream().limit(160).forEach(mod -> context.append("- ").append(mod.displayText()).append('\n'));
         context.append("\n扫描目录：config/、defaultconfigs/、world/serverconfig/")
-                .append("\n发现配置文件：").append(paths.size()).append(" 个\n");
+                .append("\n发现配置文件：").append(paths.size()).append(" 个\n")
+                .append("文件清单状态：")
+                .append(inventory.truncated() ? "已截断，不代表全部文件" : "未触发清单上限")
+                .append('\n');
         if (paths.isEmpty()) {
             context.append("未发现可读取的配置文件。请明确说明没有证据，不能编造路径或键名。\n");
             return context.toString();
@@ -504,6 +546,13 @@ public final class CubePilotCommands {
             String contents = scan.read(path);
             ConfigInspector.ConfigDocument document = ConfigInspector.inspect(path, contents);
             context.append("格式：").append(document.format()).append('\n');
+            for (String warning : document.warnings()) {
+                if (context.length() - start >= budget) {
+                    context.append("…\n");
+                    break;
+                }
+                context.append("解析警告：").append(warning).append('\n');
+            }
             if (document.entries().isEmpty()) {
                 context.append("（没有识别到结构化键值，提供脱敏原文节选）\n");
                 String excerpt = contents.replaceAll("[\\r\\n]+", " ").trim();
@@ -542,6 +591,15 @@ public final class CubePilotCommands {
     private static int askDirect(CommandSourceStack source, String loader,
             List<ModInfo> mods, String question, String attachedContext) {
         return askDirect(source, loader, mods, question, attachedContext, PromptTemplates.ASK, true, true);
+    }
+
+    private static int askRequest(CommandSourceStack source, String loader,
+            List<ModInfo> mods, String question) {
+        if (question == null || question.isBlank() || question.length() > 4000) {
+            return fail(source, "问题不能为空且长度不能超过 4000 个字符。");
+        }
+        if (!acquireAiRequest(source)) return 0;
+        return askDirect(source, loader, mods, question, "", PromptTemplates.ASK, false);
     }
 
     private static int askDirect(CommandSourceStack source, String loader,
@@ -681,6 +739,7 @@ public final class CubePilotCommands {
                 .toList();
         List<String> manualCommands = new ArrayList<>();
         List<String> offerCommands = new ArrayList<>();
+        List<ValidatedCommand> automaticCommands = new ArrayList<>();
         String rejectionReason = null;
         for (String suggestion : reply.commandSuggestions()) {
             CommandPolicy.Decision decision = CommandPolicy.evaluate(
@@ -704,24 +763,8 @@ public final class CubePilotCommands {
             }
 
             if (decision.automatic()) {
-                try {
-                    int result = source.getServer().getCommands().getDispatcher().execute(validated.parsed());
-                    agent.audit().record(source.getTextName(), "command.auto-executed",
-                            "command=" + command + " result=" + result + " reason=" + decision.reason());
-                    agent.audit().recordTrace(requestId, actorId(source), "command.executed", command,
-                            "result=" + result);
-                    sendExecuted(source, command);
-                    agent.updateConversationOutcome(actorId(source), "已成功执行：" + readableCommand(command));
-                    return;
-                } catch (CommandSyntaxException | RuntimeException exception) {
-                    agent.audit().record(source.getTextName(), "command.auto-error",
-                            "command=" + command + " error=" + safeMessage(exception));
-                    agent.audit().recordTrace(requestId, actorId(source), "command.execution-error", command,
-                            safeMessage(exception));
-                    send(source, "执行失败：" + shortText(safeMessage(exception), 160));
-                    agent.updateConversationOutcome(actorId(source), "执行失败：" + shortText(safeMessage(exception), 120));
-                    return;
-                }
+                automaticCommands.add(validated);
+                continue;
             }
 
             if (decision.manualAllowed()) {
@@ -736,6 +779,39 @@ public final class CubePilotCommands {
             } else if (!decision.manualAllowed() && rejectionReason == null) {
                 rejectionReason = decision.reason();
             }
+        }
+
+        List<String> executedCommands = new ArrayList<>();
+        List<Component> executedDescriptions = new ArrayList<>();
+        String executionError = null;
+        for (ValidatedCommand automatic : automaticCommands) {
+            String command = automatic.command();
+            try {
+                int result = source.getServer().getCommands().getDispatcher().execute(automatic.parsed());
+                executedCommands.add(command);
+                executedDescriptions.add(executedDescription(automatic));
+                agent.audit().record(source.getTextName(), "command.auto-executed",
+                        "command=" + command + " result=" + result + " reason=命中自动执行白名单");
+                agent.audit().recordTrace(requestId, actorId(source), "command.executed", command,
+                        "result=" + result);
+            } catch (CommandSyntaxException | RuntimeException exception) {
+                executionError = shortText(safeMessage(exception), 160);
+                agent.audit().record(source.getTextName(), "command.auto-error",
+                        "command=" + command + " error=" + executionError);
+                agent.audit().recordTrace(requestId, actorId(source), "command.execution-error", command,
+                        executionError);
+                break;
+            }
+        }
+        if (!executedCommands.isEmpty()) {
+            sendExecuted(source, executedDescriptions);
+            agent.updateConversationOutcome(actorId(source), "已成功执行："
+                    + executedCommands.stream().map(CubePilotCommands::readableCommand)
+                            .collect(java.util.stream.Collectors.joining("、")));
+        }
+        if (executionError != null) {
+            send(source, "执行失败：" + executionError);
+            agent.updateConversationOutcome(actorId(source), "执行失败：" + executionError);
         }
 
         if (!manualCommands.isEmpty() || !offerCommands.isEmpty()) {
@@ -763,13 +839,14 @@ public final class CubePilotCommands {
                                 ClickEvent.Action.RUN_COMMAND, "/cp allow add " + token)));
                 source.sendSuccess(() -> add, false);
             }
-        } else if (!reply.commandSuggestions().isEmpty()) {
+        } else if (executedCommands.isEmpty() && executionError == null
+                && !reply.commandSuggestions().isEmpty()) {
             send(source, "命令未执行：" + shortText(
                     rejectionReason == null ? "未通过安全或语法检查" : rejectionReason, 120));
             agent.audit().recordTrace(requestId, actorId(source), "command.rejected", requestQuestion,
                     rejectionReason == null ? "未通过安全或语法检查" : rejectionReason);
             agent.updateConversationOutcome(actorId(source), "命令被安全策略或语法检查拒绝");
-        } else {
+        } else if (executedCommands.isEmpty() && executionError == null) {
             sendCompactLines(source, reply.answer(), 8, 180);
         }
     }
@@ -789,9 +866,10 @@ public final class CubePilotCommands {
         List<String> modTexts = modTexts(mods);
         return CubePilotTasks.supplyAsync(() -> {
             try {
+                ReadOnlyFileAccess.FileInventory inventory = files.configurationInventory();
                 return new ServerSnapshot(Instant.now(), SharedConstants.getCurrentVersion().getName(), loader,
                         difficulty, playerCount, whitelist, files.readServerSettingsSnapshot(),
-                        files.configurationInventorySnapshot(), modTexts);
+                        inventory.paths(), inventory.truncated(), modTexts);
             } catch (IOException exception) {
                 throw new CompletionException(exception);
             }
@@ -927,12 +1005,75 @@ public final class CubePilotCommands {
         return parts[0] + " 操作";
     }
 
-    private static void sendExecuted(CommandSourceStack source, String command) {
-        Component result = Component.literal("已执行：").withStyle(ChatFormatting.WHITE)
-                .append(Component.literal(readableCommand(command)).withStyle(ChatFormatting.AQUA)
-                        .withStyle(style -> style.withHoverEvent(new HoverEvent(
-                                HoverEvent.Action.SHOW_TEXT, Component.literal(command)))));
-        source.sendSuccess(() -> Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA).append(result), false);
+    private static Component executedDescription(ValidatedCommand validated) {
+        Component item = createItemDisplay(validated);
+        if (item != null) return item;
+        return Component.literal(readableCommand(validated.command())).withStyle(ChatFormatting.AQUA)
+                .withStyle(style -> style.withHoverEvent(new HoverEvent(
+                        HoverEvent.Action.SHOW_TEXT, Component.literal("由 CubePilot 自动执行"))));
+    }
+
+    /** 从 Brigadier 已解析参数构造物品悬停；版本 API 不兼容时安全退回普通说明。 */
+    private static Component createItemDisplay(ValidatedCommand validated) {
+        String clean = validated.command().stripLeading().replaceFirst("^/", "");
+        if (!clean.regionMatches(true, 0, "give ", 0, 5)) return null;
+        try {
+            Object context = validated.parsed().getContext();
+            Object itemInput = null;
+            int count = 1;
+            while (context != null) {
+                Object arguments = context.getClass().getMethod("getArguments").invoke(context);
+                if (arguments instanceof Map<?, ?> map) {
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
+                        Object parsedArgument = entry.getValue();
+                        Object value = parsedArgument.getClass().getMethod("getResult").invoke(parsedArgument);
+                        if ("count".equals(entry.getKey()) && value instanceof Number number) {
+                            count = number.intValue();
+                        } else if (value != null && value.getClass().getSimpleName().equals("ItemInput")) {
+                            itemInput = value;
+                        }
+                    }
+                }
+                Object child = context.getClass().getMethod("getChild").invoke(context);
+                context = child == context ? null : child;
+            }
+            if (itemInput == null) return null;
+            Object itemStack = itemInput.getClass().getMethod("createItemStack", int.class, boolean.class)
+                    .invoke(itemInput, count, false);
+            Object hoverName = itemStack.getClass().getMethod("getHoverName").invoke(itemStack);
+            if (!(hoverName instanceof Component itemName)) return null;
+            Class<?> infoClass = Class.forName("net.minecraft.network.chat.HoverEvent$ItemStackInfo");
+            Object itemInfo = null;
+            for (java.lang.reflect.Constructor<?> constructor : infoClass.getConstructors()) {
+                if (constructor.getParameterCount() == 1
+                        && constructor.getParameterTypes()[0].isInstance(itemStack)) {
+                    itemInfo = constructor.newInstance(itemStack);
+                    break;
+                }
+            }
+            if (itemInfo == null) return null;
+            for (java.lang.reflect.Constructor<?> constructor : HoverEvent.class.getConstructors()) {
+                if (constructor.getParameterCount() == 2
+                        && constructor.getParameterTypes()[0] == HoverEvent.Action.class) {
+                    HoverEvent hover = (HoverEvent) constructor.newInstance(HoverEvent.Action.SHOW_ITEM, itemInfo);
+                    return itemName.copy().withStyle(ChatFormatting.AQUA)
+                            .withStyle(style -> style.withHoverEvent(hover));
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // 版本内部结构不同不会影响命令执行，只退回不含命令/NBT 的文本悬停。
+        }
+        return null;
+    }
+
+    private static void sendExecuted(CommandSourceStack source, List<Component> descriptions) {
+        Component result = Component.literal("已执行：").withStyle(ChatFormatting.WHITE);
+        for (int index = 0; index < descriptions.size(); index++) {
+            if (index > 0) result = result.copy().append(Component.literal("、").withStyle(ChatFormatting.WHITE));
+            result = result.copy().append(descriptions.get(index));
+        }
+        Component completed = Component.literal(PREFIX).withStyle(ChatFormatting.DARK_AQUA).append(result);
+        source.sendSuccess(() -> completed, false);
     }
 
     private static String replySummary(AssistantReply reply) {
@@ -953,14 +1094,15 @@ public final class CubePilotCommands {
         ParseResults<CommandSourceStack> parsed = source.getServer().getCommands()
                 .getDispatcher().parse(command.substring(1), source);
         if (parsed.getReader().canRead() || !parsed.getExceptions().isEmpty()) {
-            return new ValidatedCommand(null, false,
+            return new ValidatedCommand(command, null, false,
                     "Minecraft " + SharedConstants.getCurrentVersion().getName() + " 命令参数校验失败："
                             + parseFailure(parsed));
         }
-        return new ValidatedCommand(parsed, true, "");
+        return new ValidatedCommand(command, parsed, true, "");
     }
 
-    private record ValidatedCommand(ParseResults<CommandSourceStack> parsed, boolean valid, String reason) {
+    private record ValidatedCommand(String command, ParseResults<CommandSourceStack> parsed,
+            boolean valid, String reason) {
     }
 
     private static int fail(CommandSourceStack source, String message) {
@@ -992,6 +1134,7 @@ public final class CubePilotCommands {
     }
 
     private static String safeMessage(Throwable error) {
+        if (error == null) return "未知原因";
         Throwable cause = error;
         while ((cause instanceof CompletionException || cause instanceof java.util.concurrent.ExecutionException)
                 && cause.getCause() != null) {

@@ -172,32 +172,47 @@ public final class ReadOnlyFileAccess {
     }
 
     public List<String> configurationInventorySnapshot() {
+        return configurationInventory().paths();
+    }
+
+    /** 返回有边界的只读文件清单，并显式说明清单是否因安全上限而截断。 */
+    public FileInventory configurationInventory() {
         List<String> files = new ArrayList<>();
         int[] visitedEntries = {0};
+        boolean[] truncated = {false};
         for (String root : List.of("config", "defaultconfigs", "world/serverconfig", "logs", "crash-reports")) {
             Path directory = serverRoot.resolve(root);
             if (isSafeDirectory(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
-                collectInventory(directory, root, 0, visitedEntries, files);
+                collectInventory(directory, root, 0, visitedEntries, files, truncated);
             }
             if (files.size() >= MAX_INVENTORY_FILES || visitedEntries[0] >= MAX_INVENTORY_ENTRIES_VISITED) {
+                truncated[0] = true;
                 break;
             }
         }
         files.sort(String::compareTo);
-        return List.copyOf(files.subList(0, Math.min(files.size(), MAX_INVENTORY_FILES)));
+        List<String> paths = List.copyOf(files.subList(0, Math.min(files.size(), MAX_INVENTORY_FILES)));
+        return new FileInventory(paths, truncated[0], visitedEntries[0]);
     }
 
     /** 仅返回配置目录中的白名单文件，供一次性的模型配置分析使用。 */
     public List<String> configurationFilesSnapshot() {
-        return configurationInventorySnapshot().stream()
+        return configurationInventory().paths().stream()
                 .filter(ReadOnlyFileAccess::isConfigurationPath)
                 .toList();
     }
 
+    public record FileInventory(List<String> paths, boolean truncated, int visitedEntries) {
+        public FileInventory {
+            paths = List.copyOf(paths);
+        }
+    }
+
     private static void collectInventory(Path directory, String relativePath, int depth,
-            int[] visitedEntries, List<String> files) {
+            int[] visitedEntries, List<String> files, boolean[] truncated) {
         if (depth > MAX_INVENTORY_DEPTH || files.size() >= MAX_INVENTORY_FILES
                 || visitedEntries[0] >= MAX_INVENTORY_ENTRIES_VISITED) {
+            truncated[0] = true;
             return;
         }
         if (isCubePilotConfigPath(relativePath)) {
@@ -206,6 +221,7 @@ public final class ReadOnlyFileAccess {
         try (DirectoryStream<Path> children = Files.newDirectoryStream(directory)) {
             for (Path child : children) {
                 if (++visitedEntries[0] > MAX_INVENTORY_ENTRIES_VISITED) {
+                    truncated[0] = true;
                     return;
                 }
                 if (Files.isSymbolicLink(child)) {
@@ -217,10 +233,11 @@ public final class ReadOnlyFileAccess {
                 }
                 String childPath = relativePath + "/" + name;
                 if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
-                    collectInventory(child, childPath, depth + 1, visitedEntries, files);
+                    collectInventory(child, childPath, depth + 1, visitedEntries, files, truncated);
                 } else if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) && isAllowedFile(name)) {
                     files.add(childPath);
                     if (files.size() >= MAX_INVENTORY_FILES) {
+                        truncated[0] = true;
                         return;
                     }
                 }

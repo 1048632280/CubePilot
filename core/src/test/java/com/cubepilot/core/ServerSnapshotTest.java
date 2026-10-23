@@ -25,4 +25,13 @@ class ServerSnapshotTest {
         assertFalse(status.contains("config/example.toml"));
         assertFalse(status.contains("online-mode=true"));
     }
+
+    @Test
+    void promptStatesWhenFileInventoryWasTruncated() {
+        ServerSnapshot snapshot = new ServerSnapshot(Instant.parse("2026-10-20T00:00:00Z"),
+                "1.21.1", "Fabric", "normal", 1, true, Map.of(),
+                List.of("config/example.toml"), true, List.of());
+
+        assertTrue(snapshot.toPromptText().contains("清单已达到扫描边界"));
+    }
 }
