@@ -21,6 +21,7 @@ loom {
     mods {
         cubepilot {
             sourceSet sourceSets.main
+            sourceSet project(':core').sourceSets.main
         }
     }
 }

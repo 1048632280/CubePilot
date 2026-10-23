@@ -26,7 +26,7 @@ class AuditLogTest {
     }
 
     @Test
-    void persistsRedactedStructuredEventsAndRotatesOldFiles() throws IOException {
+    void persistsRedactedStructuredEventsAndRotatesOldFiles() throws IOException, InterruptedException {
         AuditLog audit = new AuditLog(directory);
         audit.record("Admin", "command.suggested", "api.key=top-secret");
         assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
@@ -48,7 +48,7 @@ class AuditLogTest {
     }
 
     @Test
-    void recordsTraceFieldsWithoutSecrets() throws IOException {
+    void recordsTraceFieldsWithoutSecrets() throws IOException, InterruptedException {
         AuditLog audit = new AuditLog(directory);
         audit.recordTrace("req-1", "Admin", "model.output", "api.key=top-secret", "answer=ok");
         assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));
@@ -61,7 +61,7 @@ class AuditLogTest {
     }
 
     @Test
-    void canDisableTraceWithoutDisablingAudit() throws IOException {
+    void canDisableTraceWithoutDisablingAudit() throws IOException, InterruptedException {
         AuditLog audit = new AuditLog(directory, false, 1024);
         audit.record("Admin", "command.executed", "ok");
         audit.recordTrace("req-2", "Admin", "model.response", "input", "hidden");
@@ -72,7 +72,7 @@ class AuditLogTest {
     }
 
     @Test
-    void marksTruncatedFields() throws IOException {
+    void marksTruncatedFields() throws IOException, InterruptedException {
         AuditLog audit = new AuditLog(directory, true, 1024);
         audit.recordTrace("req-3", "Admin", "long", "x".repeat(2000), "ok");
         assertTrue(AuditLog.awaitPendingWrites(5, TimeUnit.SECONDS));

@@ -21,6 +21,7 @@ minecraft {
             mods {
                 cubepilot {
                     source sourceSets.main
+                    source project(':core').sourceSets.main
                 }
             }
         }
