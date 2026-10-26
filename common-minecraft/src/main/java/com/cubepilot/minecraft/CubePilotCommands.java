@@ -401,19 +401,20 @@ public final class CubePilotCommands {
             send(source, "正在处理，请稍候…");
             ServerPlayer player = source.getEntity() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
             PendingClarification pending = player == null ? null
-                    : PENDING_CLARIFICATIONS.remove(player.getUUID());
-            if (pending != null) {
-                if (pending.expiresAtMillis() > System.currentTimeMillis()) {
-                    String combined = pending.question() + "\n玩家补充：" + question;
-                    return askDirect(source, loader, mods, combined, attachedContext,
-                            PromptTemplates.commandFor(SharedConstants.getCurrentVersion().getName()), true,
-                            false);
-                }
+                    : PENDING_CLARIFICATIONS.get(player.getUUID());
+            if (pending != null && pending.expiresAtMillis() <= System.currentTimeMillis()) {
+                PENDING_CLARIFICATIONS.remove(player.getUUID(), pending);
+                pending = null;
             }
             String requestId = UUID.randomUUID().toString();
             agent.audit().recordTrace(requestId, actorId(source), "request.input", question,
                     "conversation_turns=" + agent.conversationSize(actorId(source)));
-            agent.classify(actorId(source), question, requestId).whenComplete((intent, error) -> source.getServer().execute(() -> {
+            CompletableFuture<com.cubepilot.core.AgentIntent> classification = pending == null
+                    ? agent.classify(actorId(source), question, requestId)
+                    : (isClarificationReply(question)
+                            ? CompletableFuture.completedFuture(com.cubepilot.core.AgentIntent.COMMAND)
+                            : agent.classify(question));
+            classification.whenComplete((intent, error) -> source.getServer().execute(() -> {
                 if (error != null || intent == null || intent == AgentIntent.UNKNOWN) {
                     String reason = error == null ? "分类器返回无效意图" : safeMessage(error);
                     agent.audit().record(source.getTextName(), "request.route.error", reason);
@@ -422,7 +423,17 @@ public final class CubePilotCommands {
                     send(source, "请求分类失败，请重试或使用明确的子命令。");
                     return;
                 }
-                AgentIntent selected = intent == null ? AgentIntent.ASK : intent;
+                AgentIntent selected = intent;
+                PendingClarification currentPending = player == null ? null
+                        : PENDING_CLARIFICATIONS.remove(player.getUUID());
+                if (currentPending != null && currentPending.expiresAtMillis() > System.currentTimeMillis()
+                        && selected == AgentIntent.COMMAND) {
+                    String combined = currentPending.question() + "\n玩家补充：" + question;
+                    askDirect(source, loader, mods, combined, attachedContext,
+                            PromptTemplates.commandFor(SharedConstants.getCurrentVersion().getName()),
+                            true, false, requestId);
+                    return;
+                }
                 agent.audit().recordTrace(requestId, actorId(source), "classifier.result", question,
                         selected.name());
                 switch (selected) {
@@ -734,6 +745,12 @@ public final class CubePilotCommands {
             agent.updateConversationOutcome(actorId(source), "等待补充信息");
             return;
         }
+        try {
+            agent = CubePilotAgent.get();
+        } catch (IOException | IllegalArgumentException exception) {
+            send(source, "配置重载后无法验证命令，未执行。");
+            return;
+        }
         List<String> onlinePlayers = source.getServer().getPlayerList().getPlayers().stream()
                 .map(onlinePlayer -> onlinePlayer.getGameProfile().getName())
                 .toList();
@@ -787,9 +804,32 @@ public final class CubePilotCommands {
         for (ValidatedCommand automatic : automaticCommands) {
             String command = automatic.command();
             try {
-                int result = source.getServer().getCommands().getDispatcher().execute(automatic.parsed());
+                CommandPolicy.Decision currentDecision = CommandPolicy.reevaluateForExecution(
+                        command, agent.config(), source.getTextName(), onlinePlayers);
+                if (!currentDecision.valid() || !currentDecision.automatic()) {
+                    executionError = "当前安全配置不允许自动执行该命令";
+                    agent.audit().record(source.getTextName(), "command.rejected", executionError);
+                    agent.audit().recordTrace(requestId, actorId(source), "command.execution-rejected",
+                            command, executionError);
+                    break;
+                }
+                ValidatedCommand currentValidated = validateForRuntime(source, currentDecision.command());
+                if (!currentValidated.valid()) {
+                    executionError = shortText(currentValidated.reason(), 160);
+                    agent.audit().record(source.getTextName(), "command.rejected", executionError);
+                    break;
+                }
+                int result = source.getServer().getCommands().getDispatcher().execute(currentValidated.parsed());
+                if (!CommandPolicy.successfulExecutionResult(result)) {
+                    executionError = "命令未产生成功结果（结果 " + result + "）";
+                    agent.audit().record(source.getTextName(), "command.auto-error",
+                            "command=" + command + " result=" + result);
+                    agent.audit().recordTrace(requestId, actorId(source), "command.execution-error", command,
+                            executionError);
+                    break;
+                }
                 executedCommands.add(command);
-                executedDescriptions.add(executedDescription(automatic));
+                executedDescriptions.add(executedDescription(currentValidated));
                 agent.audit().record(source.getTextName(), "command.auto-executed",
                         "command=" + command + " result=" + result + " reason=命中自动执行白名单");
                 agent.audit().recordTrace(requestId, actorId(source), "command.executed", command,
@@ -1162,6 +1202,12 @@ public final class CubePilotCommands {
     private static void pruneExpiredClarifications() {
         long now = System.currentTimeMillis();
         PENDING_CLARIFICATIONS.entrySet().removeIf(entry -> entry.getValue().expiresAtMillis() <= now);
+    }
+
+    private static boolean isClarificationReply(String question) {
+        String normalized = question == null ? "" : question.trim().toLowerCase(java.util.Locale.ROOT);
+        return java.util.Set.of("是", "是的", "对", "对的", "可以", "确认", "要", "不是", "不对",
+                "第一个", "第二个", "第一个吧", "第二个吧", "1", "2").contains(normalized);
     }
 
     private record PendingClarification(String question, long expiresAtMillis) {

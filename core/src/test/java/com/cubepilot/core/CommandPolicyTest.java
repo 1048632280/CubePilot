@@ -114,6 +114,41 @@ class CommandPolicyTest {
         assertEquals("give @s stone 1", CommandPolicy.normalizeForRule(" /give   @s stone 1 "));
     }
 
+    @Test
+    void quotedDangerousNbtKeysCannotBypassPermanentAutoDeny() throws IOException {
+        CubePilotConfig allowGive = configWith(defaults -> defaults
+                .replace("    # \"time\",", "    \"give\",")
+                .replace("complex-nbt = 3", "complex-nbt = 0"));
+
+        for (String payload : List.of(
+                "{\"command\":\"say hacked\"}",
+                "{'entity_data':{id:'minecraft:stone'}}",
+                "{\"minecraft:entity_data\":{id:\"minecraft:stone\"}}")) {
+            assertFalse(decide("give @s stone" + payload + " 1", allowGive).automatic(), payload);
+        }
+    }
+
+    @Test
+    void changedConfigIsUsedWhenReevaluatingAnInFlightCandidate() throws IOException {
+        CubePilotConfig allowTime = configWith(defaults -> defaults.replace(
+                "    # \"time\",", "    \"time\","));
+        assertTrue(CommandPolicy.reevaluateForExecution("time set day", allowTime,
+                "Steve", List.of("Steve")).automatic());
+
+        CubePilotConfig denyTime = configWith(defaults -> defaults
+                .replace("    # \"time\",", "    \"time\",")
+                .replace("    # \"gamerule keepInventory true\",", "    \"time set day\","));
+        assertFalse(CommandPolicy.reevaluateForExecution("time set day", denyTime,
+                "Steve", List.of("Steve")).automatic());
+    }
+
+    @Test
+    void zeroOrNegativeCommandResultsAreNotReportedAsSuccess() {
+        assertFalse(CommandPolicy.successfulExecutionResult(0));
+        assertFalse(CommandPolicy.successfulExecutionResult(-1));
+        assertTrue(CommandPolicy.successfulExecutionResult(1));
+    }
+
     private CommandPolicy.Decision decide(String command, CubePilotConfig config) {
         return CommandPolicy.evaluate(command, config, "Steve", List.of("Steve"));
     }

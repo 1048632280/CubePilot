@@ -131,4 +131,20 @@ class ReadOnlyFileAccessTest {
         assertTrue(inventory.truncated());
         assertTrue(inventory.visitedEntries() >= 80);
     }
+
+    @Test
+    void inventoryChoosesLexicographicallyFirstFilesBeforeApplyingFileLimit() throws IOException {
+        Path config = Files.createDirectories(serverRoot.resolve("config/many"));
+        for (int index = 89; index >= 0; index--) {
+            Files.writeString(config.resolve(String.format("file-%03d.toml", index)), "enabled=true\n");
+        }
+        ReadOnlyFileAccess access = new ReadOnlyFileAccess(serverRoot, 16384);
+
+        ReadOnlyFileAccess.FileInventory inventory = access.configurationInventory();
+
+        assertEquals(80, inventory.paths().size());
+        assertEquals("config/many/file-000.toml", inventory.paths().get(0));
+        assertEquals("config/many/file-079.toml", inventory.paths().get(79));
+        assertTrue(inventory.truncated());
+    }
 }

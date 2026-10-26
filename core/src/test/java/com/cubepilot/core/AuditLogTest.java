@@ -26,6 +26,20 @@ class AuditLogTest {
     }
 
     @Test
+    void redactsCredentialFieldsInCommonConfigFormats() {
+        String input = "credentials=plain-secret\ncredential: yaml-secret\n"
+                + "{\"credentials\":\"json-secret\", \"client_secret\":\"oauth-secret\"}";
+        String redacted = AuditLog.redact(input);
+
+        assertTrue(redacted.contains("credentials=[已隐藏]"));
+        assertTrue(redacted.contains("credential: [已隐藏]"));
+        assertFalse(redacted.contains("plain-secret"));
+        assertFalse(redacted.contains("yaml-secret"));
+        assertFalse(redacted.contains("json-secret"));
+        assertFalse(redacted.contains("oauth-secret"));
+    }
+
+    @Test
     void persistsRedactedStructuredEventsAndRotatesOldFiles() throws IOException, InterruptedException {
         AuditLog audit = new AuditLog(directory);
         audit.record("Admin", "command.suggested", "api.key=top-secret");

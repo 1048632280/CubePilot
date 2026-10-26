@@ -19,9 +19,8 @@ public final class CommandPolicy {
             "minecraft:command_block", "minecraft:chain_command_block", "minecraft:repeating_command_block",
             "minecraft:structure_block", "minecraft:jigsaw", "command_block", "chain_command_block",
             "repeating_command_block", "structure_block", "jigsaw");
-    private static final Set<String> DANGEROUS_NBT_KEYS = Set.of(
-            "command", "commandblockoutput", "command_block_output", "entitytag", "passengers",
-            "entity_data", "block_entity_data", "minecraft:entity_data", "minecraft:block_entity_data");
+    private static final Pattern DANGEROUS_NBT_FIELD = Pattern.compile(
+            "(?i)(?:^|[\\{\\[,\\s])['\\\"]?(?:command|commandblockoutput|command_block_output|entitytag|passengers|entity_data|block_entity_data|minecraft:entity_data|minecraft:block_entity_data)['\\\"]?\\s*[:=]");
     private static final Pattern ALL_PLAYERS = Pattern.compile("(?i)@a(?=\\b|\\[)");
     private static final Pattern ALL_ENTITIES = Pattern.compile("(?i)@e(?=\\b|\\[)");
     private static final Pattern OTHER_SELECTOR = Pattern.compile("(?i)@[pra](?=\\b|\\[)");
@@ -288,12 +287,18 @@ public final class CommandPolicy {
                 return true;
             }
         }
-        for (String key : DANGEROUS_NBT_KEYS) {
-            if (lower.matches(".*(?:[\\{\\[,\\s])" + Pattern.quote(key) + "\\s*[:=].*")) {
-                return true;
-            }
-        }
-        return false;
+        return DANGEROUS_NBT_FIELD.matcher(lower).find();
+    }
+
+    /** 执行端应基于当前配置重新计算策略；保留纯函数便于覆盖热重载边界。 */
+    public static Decision reevaluateForExecution(String command, CubePilotConfig currentConfig,
+            String actorName, List<String> onlinePlayerNames) {
+        return evaluate(command, currentConfig, actorName, onlinePlayerNames);
+    }
+
+    /** Minecraft 命令返回值为正数才表示产生了成功结果；零通常表示目标未受影响。 */
+    public static boolean successfulExecutionResult(int result) {
+        return result > 0;
     }
 
     private static boolean hasBalancedPayload(String command) {

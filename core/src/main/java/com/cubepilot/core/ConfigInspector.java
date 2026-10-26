@@ -19,7 +19,7 @@ public final class ConfigInspector {
     private static final int MAX_DEPTH = 16;
     private static final int MAX_VALUE_LENGTH = 240;
     private static final Pattern SENSITIVE_KEY = Pattern.compile(
-            "(?i)(?:api[._ -]?key|password|passwd|secret|token|authorization|private[._ -]?key)");
+            "(?i)(?:api[._ -]?key|password|passwd|secret|token|authorization|private[._ -]?key|credentials?)");
 
     private ConfigInspector() {
     }

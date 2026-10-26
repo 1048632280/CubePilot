@@ -219,7 +219,17 @@ public final class ReadOnlyFileAccess {
             return;
         }
         try (DirectoryStream<Path> children = Files.newDirectoryStream(directory)) {
+            List<Path> orderedChildren = new ArrayList<>();
+            int remaining = MAX_INVENTORY_ENTRIES_VISITED - visitedEntries[0];
             for (Path child : children) {
+                if (orderedChildren.size() >= remaining) {
+                    truncated[0] = true;
+                    break;
+                }
+                orderedChildren.add(child);
+            }
+            orderedChildren.sort(Comparator.comparing(path -> path.getFileName().toString()));
+            for (Path child : orderedChildren) {
                 if (++visitedEntries[0] > MAX_INVENTORY_ENTRIES_VISITED) {
                     truncated[0] = true;
                     return;

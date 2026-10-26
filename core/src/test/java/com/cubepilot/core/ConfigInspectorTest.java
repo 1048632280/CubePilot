@@ -27,6 +27,20 @@ class ConfigInspectorTest {
     }
 
     @Test
+    void hidesCredentialKeysInJsonYamlAndToml() {
+        ConfigInspector.ConfigDocument json = ConfigInspector.inspect("config/credentials.json",
+                "{\"credentials\":\"json-secret\"}");
+        ConfigInspector.ConfigDocument yaml = ConfigInspector.inspect("config/credentials.yaml",
+                "auth:\n  credential: yaml-secret\n");
+        ConfigInspector.ConfigDocument toml = ConfigInspector.inspect("config/credentials.toml",
+                "[oauth]\nclient_secret = \"toml-secret\"\n");
+
+        assertEquals("[已隐藏]", find(json.entries(), "credentials").value());
+        assertEquals("[已隐藏]", find(yaml.entries(), "auth.credential").value());
+        assertEquals("[已隐藏]", find(toml.entries(), "oauth.client_secret").value());
+    }
+
+    @Test
     void doesNotInventJsonLineWhenLeafKeyIsRepeated() {
         ConfigInspector.ConfigDocument document = ConfigInspector.inspect("config/repeated.json",
                 "{\n  \"first\": {\"enabled\": true},\n  \"second\": {\"enabled\": false}\n}\n");
